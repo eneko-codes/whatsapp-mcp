@@ -1,0 +1,70 @@
+{
+  "manifest_version": "0.3",
+  "name": "whatsapp-mcp",
+  "display_name": "WhatsApp",
+  "version": "1.0.0",
+  "description": "Search and read WhatsApp history on this Mac. Read-only: it cannot send, edit or delete anything",
+  "long_description": "A local MCP server written in Swift that reads WhatsApp on this Mac.\n\nEverything comes from WhatsApp's own local database, opened read-only and immutable. Unusually, no macOS permission is involved at all: WhatsApp's container is not protected the way Apple's own stores are.\n\nThat database is WhatsApp's private storage. It is undocumented and free to change in any update, so this server checks its shape first and says plainly when it no longer matches — a schema change must not read as “you have no messages”.\n\nRead-only by construction. There is no tool here that sends, edits or deletes anything, no shortcut, and no route to WhatsApp's network — the send path was removed from this server outright rather than left switched off.\n\nPlug and play: there is nothing to configure.\n\nNot affiliated with, endorsed by, or connected to WhatsApp or Meta.",
+  "author": {
+    "name": "eneko-codes",
+    "url": "https://github.com/eneko-codes"
+  },
+  "homepage": "https://github.com/eneko-codes/whatsapp-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eneko-codes/whatsapp-mcp"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": [
+    "whatsapp",
+    "messages",
+    "chat",
+    "macos"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/whatsapp-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/whatsapp-mcp",
+      "args": [],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "whatsapp_status",
+      "description": "Reports whether WhatsApp's local database can be read, how much is in it, what WhatsApp does not store locally at all, and exactly what to do about anything missing. Reads no messages."
+    },
+    {
+      "name": "chats_list",
+      "description": "Lists conversations with their id, kind, unread count, how many messages are stored, and when the last one arrived."
+    },
+    {
+      "name": "chat_get",
+      "description": "Returns a page of messages from one chat, newest first by default, each line saying who sent it and what the message is — text, a photo, a voice note with its length, a sticker, a location, a link, a group event, or a deletion."
+    },
+    {
+      "name": "whatsapp_search",
+      "description": "Finds messages whose text contains a phrase, across every chat or within one. Matching ignores case and accents, so \"angel\" finds \"Ángel\"."
+    },
+    {
+      "name": "message_get",
+      "description": "Everything this database holds about one message: mentions, both timestamps, an attachment's path, size, length, author and WhatsApp URL, a shared contact's full vCard, a link preview, a group event's actor and subject, and the raw delivery and error codes."
+    },
+    {
+      "name": "media_list",
+      "description": "Lists what was shared rather than said: photos, videos, GIFs, stickers, voice notes, audio files, documents, shared locations and shared contact cards, with the message id each belongs to and the file's path on this Mac when it is here."
+    },
+    {
+      "name": "group_get",
+      "description": "What this server can read about a group: when it was created and by whom, when its name last changed, and every member row with its address, resolved name and admin flag."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin"
+    ]
+  }
+}
