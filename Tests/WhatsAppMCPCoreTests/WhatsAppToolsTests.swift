@@ -137,6 +137,30 @@ struct WhatsAppToolsTests {
         #expect(text.contains("ZWAMESSAGEDATAITEM"))
     }
 
+    /// The schema was searched exhaustively for a LID→phone mapping and none exists — see
+    /// the comment on `JIDDisplay`. That is a claim about data this server will never be
+    /// able to produce, not an implementation gap, so `whatsapp_status` says so up front
+    /// rather than leaving a caller to discover it by asking `group_get` or `message_get`
+    /// for a phone number a `…@lid` sender simply does not carry.
+    @Test("whatsapp_status states plainly that no LID-to-phone mapping exists")
+    func statusStatesNoLIDToPhoneMapping() async {
+        let (text, isError) = await call(ToolCatalog.statusName, store: stocked())
+        #expect(!isError)
+        #expect(text.contains("no LID\u{2192}phone mapping"))
+    }
+
+    /// Same shape of claim as the LID mapping above: `ZWACHATSESSION` and `ZWAMESSAGE` were
+    /// searched for anything resembling "ephemeral", "expir…" or "disappear…" and neither
+    /// carries one. Silence on this in `whatsapp_status` would read as "this server just
+    /// doesn't surface it yet", which is a different and more hopeful claim than the one
+    /// that is actually true.
+    @Test("whatsapp_status states plainly that no disappearing-message field exists")
+    func statusStatesNoDisappearingMessageField() async {
+        let (text, isError) = await call(ToolCatalog.statusName, store: stocked())
+        #expect(!isError)
+        #expect(text.contains("no disappearing-message setting or TTL"))
+    }
+
     // MARK: Chats
 
     @Test("chats_list hides archived chats unless asked")

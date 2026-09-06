@@ -264,6 +264,65 @@ private func makeFixture() throws -> Fixture {
     return fixture
 }
 
+/// A second, smaller fixture whose `ZWAGROUPINFO` and `ZWAGROUPMEMBER` tables are each
+/// missing one column from the middle of the list `group_get` knows how to read —
+/// `ZCREATORJID` and `ZISADMIN` — standing in for a WhatsApp version that renamed or
+/// dropped them. `columnNames(of:)` exists so a gap like this costs one field, not the
+/// query; picking a column with columns on both sides of it is what would catch a
+/// regression that read by position instead of by name and shifted every later field into
+/// the wrong one.
+private func makeGroupSchemaWithMissingColumnsFixture() throws -> Fixture {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("whatsapp-fixture-missing-columns-\(UUID().uuidString)")
+    let fixture = Fixture(directory: directory)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+    var handle: OpaquePointer?
+    guard sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK, let database = handle else {
+        throw NSError(domain: "fixture", code: 2)
+    }
+    defer { sqlite3_close(database) }
+
+    try execute(
+        database,
+        """
+        CREATE TABLE ZWACHATSESSION (
+            Z_PK INTEGER PRIMARY KEY, ZCONTACTJID VARCHAR, ZPARTNERNAME VARCHAR,
+            ZSESSIONTYPE INTEGER, ZARCHIVED INTEGER, ZHIDDEN INTEGER, ZUNREADCOUNT INTEGER,
+            ZLASTMESSAGEDATE TIMESTAMP, ZLASTMESSAGETEXT VARCHAR, ZLASTMESSAGE INTEGER);
+        CREATE TABLE ZWAPROFILEPUSHNAME (
+            Z_PK INTEGER PRIMARY KEY, ZJID VARCHAR, ZPUSHNAME VARCHAR);
+        -- ZCREATORJID is missing; ZCREATIONDATE and ZSUBJECTTIMESTAMP sit either side of
+        -- where it would be.
+        CREATE TABLE ZWAGROUPINFO (
+            Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZCREATIONDATE TIMESTAMP,
+            ZSUBJECTTIMESTAMP TIMESTAMP, ZSUBJECTOWNERJID VARCHAR, ZPICTUREID VARCHAR);
+        -- ZISADMIN is missing; ZCONTACTNAME and ZISACTIVE sit either side of where it
+        -- would be.
+        CREATE TABLE ZWAGROUPMEMBER (
+            Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZCONTACTNAME VARCHAR,
+            ZMEMBERJID VARCHAR, ZISACTIVE INTEGER, ZFIRSTNAME VARCHAR);
+
+        INSERT INTO ZWACHATSESSION
+            (Z_PK, ZCONTACTJID, ZPARTNERNAME, ZSESSIONTYPE, ZARCHIVED, ZHIDDEN, ZUNREADCOUNT,
+             ZLASTMESSAGEDATE, ZLASTMESSAGETEXT, ZLASTMESSAGE)
+        VALUES (3, 'g@g.us', 'Test Group', 1, 0, 0, 0, \(reference - 100), 'hi', NULL);
+
+        INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME)
+        VALUES (1, '333@lid', 'Grace Hopper');
+
+        INSERT INTO ZWAGROUPINFO
+            (Z_PK, ZCHATSESSION, ZCREATIONDATE, ZSUBJECTTIMESTAMP, ZSUBJECTOWNERJID, ZPICTUREID)
+        VALUES (1, 3, \(reference - 999_999), \(reference - 500), '444@lid', 'pic-abc');
+
+        INSERT INTO ZWAGROUPMEMBER
+            (Z_PK, ZCHATSESSION, ZCONTACTNAME, ZMEMBERJID, ZISACTIVE, ZFIRSTNAME)
+        VALUES (1, 3, '', '333@lid', 1, 'CNXy9');
+        """)
+
+    return fixture
+}
+
 @Suite("SystemWhatsAppStore against a fixture database")
 struct FixtureDatabaseTests {
 
@@ -272,6 +331,43 @@ struct FixtureDatabaseTests {
         let fixture = try makeFixture()
         defer { fixture.remove() }
         #expect(SystemWhatsAppStore(path: fixture.databasePath).availability() == .ready)
+    }
+
+    // MARK: Connection
+
+    @Test("The connection URI asks for both read-only and immutable, not read-only alone")
+    func connectionURIIsReadOnlyAndImmutable() {
+        // mode=ro alone still takes locks and can touch WhatsApp's own -wal; immutable=1
+        // is what stops this server from ever contending with WhatsApp's own writer. Both
+        // flags have to survive together, in the query string after `?` — a raw path
+        // would carry neither.
+        let uri = ReadOnlyDatabase.uri(for: "/invented/Group Containers/ChatStorage.sqlite")
+        #expect(uri.hasPrefix("file:"))
+        #expect(uri.contains("mode=ro"))
+        #expect(uri.contains("immutable=1"))
+        // A real container path has a space in it; percent-encoding it wrong would open
+        // the wrong file, or none at all, rather than merely losing a flag.
+        #expect(uri.contains("Group%20Containers"))
+    }
+
+    @Test("A write through the connection is refused by SQLite itself, not by convention")
+    func writeThroughConnectionIsRefused() throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let database = try ReadOnlyDatabase(path: fixture.databasePath)
+
+        #expect(throws: (any Error).self) {
+            try database.query(
+                "UPDATE ZWACHATSESSION SET ZPARTNERNAME = 'changed' WHERE Z_PK = 1"
+            ) { _ in }
+        }
+
+        // The row itself must be provably unchanged, not just "the call threw something".
+        var name: String?
+        try database.query("SELECT ZPARTNERNAME FROM ZWACHATSESSION WHERE Z_PK = 1") { row in
+            name = row.text(0)
+        }
+        #expect(name == "Ada Lovelace")
     }
 
     // MARK: Pinned and hidden chats
@@ -857,6 +953,32 @@ struct FixtureDatabaseTests {
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
         #expect(try await store.group(chatID: 1) == nil)
+    }
+
+    @Test("A column missing from ZWAGROUPINFO or ZWAGROUPMEMBER comes back nil, never a neighbour's value")
+    func groupDegradesGracefullyWhenAColumnIsMissing() async throws {
+        let fixture = try makeGroupSchemaWithMissingColumnsFixture()
+        defer { fixture.remove() }
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+
+        let group = try #require(try await store.group(chatID: 3))
+
+        // ZCREATORJID is absent from this fixture's ZWAGROUPINFO: nil, not a crash and not
+        // ZSUBJECTTIMESTAMP's value read one column early because of a hard-coded index.
+        #expect(group.creator == nil)
+        // The columns either side of the gap must still read their own values.
+        #expect(
+            abs((group.creationDate?.timeIntervalSinceReferenceDate ?? 0) - (reference - 999_999))
+                < 1)
+        #expect(group.subjectChangedBy?.displayName == "444@lid")
+        #expect(group.pictureID == "pic-abc")
+
+        let member = try #require(group.members.first)
+        // ZISADMIN is absent from this fixture's ZWAGROUPMEMBER: nil, distinct from false.
+        #expect(member.isAdmin == nil)
+        // ZISACTIVE sits right after the gap and must still read its own value.
+        #expect(member.isActive == true)
+        #expect(member.identity.displayName == "Grace Hopper")
     }
 
     // MARK: One row shape
