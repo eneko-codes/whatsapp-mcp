@@ -44,6 +44,10 @@ named in the question you asked, it has to have a way back, and you have to say 
 you are on and why the gentler ones cannot answer it. Whatever you created, remove in the
 same session.
 
+**Work on a copy in `$TMPDIR`.** The read path takes a database path, so a copy of the
+store placed under a temporary directory you created yourself — never the live file — is
+how rung 4 is done here. Delete it in the same session.
+
 ## What this is
 
 A local, read-only MCP server (Swift 6, stdio transport) for WhatsApp. Reads come from `~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite`, opened read-only and immutable. No network, no credential, no cloud API, no outward-facing action of any kind.
