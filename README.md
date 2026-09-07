@@ -29,8 +29,8 @@ Not affiliated with or endorsed by WhatsApp or Meta.
 - WhatsApp for Mac, installed and signed in — this server reads its local database and never
   talks to WhatsApp's own servers
 
-There is no code signing identity to obtain first. Unlike the EventKit-based siblings, there
-is no TCC permission to anchor a signature to — see [Install](#install).
+There is no code signing identity to obtain first: this server needs no TCC permission, so
+there is nothing for a signature to anchor to — see [Install](#install).
 
 ## Tools
 
@@ -47,6 +47,19 @@ is no TCC permission to anchor a signature to — see [Install](#install).
 Every tool is read-only, and a test in this repository walks the whole catalogue to prove
 it. There is deliberately no `contact_get`: with no LID→phone table it would return only a
 push name and a picture path, too thin to be its own tool.
+
+## Frameworks and APIs
+
+No Apple framework is involved, and no TCC permission: WhatsApp's container is not protected
+the way Apple's own stores are.
+
+| Used | For | Reference |
+|---|---|---|
+| SQLite C API — `sqlite3_open_v2` with `SQLITE_OPEN_READONLY`, prepared statements, `sqlite3_create_function_v2` | Every read, over `file:…?mode=ro&immutable=1`; the custom `wa_contains` function does accent- and case-insensitive matching | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
+| `sqlite_master`, `attributesOfItem` on the `-wal` sidecar | Checking the schema is the shape the queries expect, and reporting unflushed writes | — |
+
+Not used: FTS or `MATCH`, the online-backup and blob APIs, any authorizer or busy handler.
+There is no write path of any kind.
 
 ## The rules worth knowing before you use it
 
@@ -71,8 +84,7 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 **What genuinely is not in this database, and will not be guessed:**
 
 - No LID→phone-number mapping. A `…@lid` address WhatsApp has never resolved for you stays a
-  LID — cross-referencing it to a name is Claude's job via the Contacts server, not this
-  one's.
+  LID — this server cannot turn it into a name.
 - No disappearing-message or expiration setting, under any name, anywhere in the schema.
 - A message deleted for everyone shows only that a deletion happened, with its sender and
   date. The original text is not recoverable, and the row it replaced cannot even be
@@ -90,9 +102,8 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 ```
 
 That builds a universal (arm64 + x86_64) release binary and writes
-`dist/whatsapp-mcp.mcpb`. Unlike the EventKit-based servers, there is no `Info.plist` to
-embed and no TCC identity to anchor a signature to — the signing step here is about
-distribution, not permission. An ad-hoc signature (the default) is enough to run on this
+`dist/whatsapp-mcp.mcpb`. There is no `Info.plist` to embed and no TCC identity to
+anchor a signature to — the signing step here is about distribution, not permission. An ad-hoc signature (the default) is enough to run on this
 Mac; set `MCPB_SIGN_IDENTITY` only if the bundle is meant to run on another one.
 
 ### 2. Install it
@@ -158,12 +169,11 @@ swift build
 swift test
 ```
 
-70 tests across two suites, all against an in-memory fake store or a fixture SQLite database
+75 tests across two suites, all against an in-memory fake store or a fixture SQLite database
 built with invented rows — never a copy of the real one. See `CLAUDE.md`, whose hard rule at
 the top is what makes that non-negotiable.
 
-Manual verification against a real WhatsApp database is the owner's job; `verification.md`
-is the script for it.
+Manual verification against a real WhatsApp database is the owner's job.
 
 ## Licence
 
