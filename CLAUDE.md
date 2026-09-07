@@ -18,6 +18,16 @@ A local, read-only MCP server (Swift 6, stdio transport) for WhatsApp. Reads com
 
 Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
+## APIs
+
+No Apple framework and no TCC permission — WhatsApp's container is not protected the way Apple's own stores are. Everything is the [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against WhatsApp's own database, opened read-only and immutable through a [URI filename](https://www.sqlite.org/uri.html), plus one application-defined function (`sqlite3_create_function_v2`) for accent- and case-insensitive matching.
+
+## Surface not used
+
+- FTS and `MATCH`, the online-backup and blob APIs, authorizers, busy handlers.
+- Any write path at all. There is no `sqlite3_open_v2` without `SQLITE_OPEN_READONLY` anywhere.
+- The schema is WhatsApp's private storage, undocumented and free to change in any update: five tables are required and three optional, checked through `sqlite_master` before any query runs. If the check fails, say the reads are wrong — not that there are no messages.
+
 ## Commands
 
 ```bash
