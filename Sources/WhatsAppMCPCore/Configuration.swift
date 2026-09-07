@@ -5,15 +5,15 @@ import Foundation
 ///
 /// `--database` is the one flag parsed from the command line, and it is not a
 /// `user_config` setting at all — nothing in `extension/manifest.json` sets it. It exists
-/// for `verification.md`, so a manual run can be pointed at a copy of the database
+/// for manual verification, so a manual run can be pointed at a copy of the database
 /// instead of the live file.
 public struct Configuration: Sendable, Equatable {
     /// Default page size for `chats_list`, `chat_get`, `whatsapp_search` and `media_list`.
     /// A tool's own `limit` still wins.
     public static let pageSize = 50
 
-    /// Where the chat store lives. Overridable only from the command line — see
-    /// `verification.md` — without the live file ever being opened.
+    /// Where the chat store lives. Overridable only from the command line, so a manual
+    /// run can be pointed elsewhere without the live file ever being opened.
     public var databasePath: String = Configuration.defaultDatabasePath
 
     public init() {}

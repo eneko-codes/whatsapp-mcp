@@ -162,8 +162,7 @@ swift test
 built with invented rows — never a copy of the real one. See `CLAUDE.md`, whose hard rule at
 the top is what makes that non-negotiable.
 
-Manual verification against a real WhatsApp database is the owner's job; `verification.md`
-is the script for it.
+Manual verification against a real WhatsApp database is the owner's job.
 
 ## Licence
 
