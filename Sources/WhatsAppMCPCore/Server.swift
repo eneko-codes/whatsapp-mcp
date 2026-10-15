@@ -48,10 +48,16 @@ public enum WhatsAppMCPServer {
     /// this function opens a database by itself.
     public static func run(
         store: (any WhatsAppStore)? = nil,
+        explorer: (any DatabaseExplorer)? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
         let tools = WhatsAppTools(
-            store: store ?? SystemWhatsAppStore(path: configuration.databasePath))
+            store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
+            explorer: explorer
+                ?? SnapshotDatabaseExplorer(
+                    cache: SnapshotCache(
+                        containerDirectory: configuration.containerDirectory,
+                        cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))))
         let server = Server(
             name: name,
             version: version,

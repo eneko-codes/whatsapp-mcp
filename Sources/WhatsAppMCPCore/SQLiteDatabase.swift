@@ -133,6 +133,171 @@ final class ReadOnlyDatabase {
         }
     }
 
+    /// Why `selectRows` refused to run a statement, or stopped it.
+    enum SelectRefusal: Error, Equatable {
+        case empty
+        case notASingleSelect
+        case notReadOnly
+        case timedOut
+        case failed(String)
+
+        var detail: String {
+            switch self {
+            case .empty: "the statement is empty"
+            case .notASingleSelect:
+                "only one SELECT (or WITH … SELECT) statement is accepted, with no leading comment"
+            case .notReadOnly: "the statement would change the database"
+            case .timedOut: "the statement ran past its time limit and was stopped"
+            case .failed(let detail): detail
+            }
+        }
+    }
+
+    struct SelectedRows: Equatable {
+        var columns: [String]
+        var rows: [[String]]
+        var truncated: Bool
+    }
+
+    /// Runs caller-supplied SQL, which is the one place in this project where a string from
+    /// outside reaches `sqlite3_prepare_v2` unbound. Three gates stand in front of it, and
+    /// each covers a hole the others leave:
+    ///
+    /// - the text must be a single statement that begins with `SELECT` or `WITH`, because
+    ///   `sqlite3_stmt_readonly` reports `ATTACH` and `DETACH` as read-only (they alter the
+    ///   connection, not the file) and would let them through;
+    /// - `sqlite3_stmt_readonly` must agree, which catches `WITH … DELETE`;
+    /// - the connection itself is `mode=ro&immutable=1`, so a mistake in the two gates
+    ///   above still cannot write.
+    ///
+    /// A progress handler enforces the time limit: a cross join over WhatsApp's message
+    /// table would otherwise hold the process for as long as it liked.
+    func selectRows(
+        _ sql: String, maxRows: Int, maxCellLength: Int = 2000,
+        maxTotalCharacters: Int = 200_000, timeLimit: TimeInterval = 5
+    ) throws -> SelectedRows {
+        let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw SelectRefusal.empty }
+        let upper = trimmed.uppercased()
+        let startsWithSelect = ["SELECT", "WITH"].contains { keyword in
+            guard upper.hasPrefix(keyword) else { return false }
+            let next = upper.dropFirst(keyword.count).first
+            return next == nil || !(next!.isLetter || next!.isNumber || next! == "_")
+        }
+        guard startsWithSelect else { throw SelectRefusal.notASingleSelect }
+
+        // `tail` points into the C buffer Swift makes for this call and is dead once the
+        // closure returns, so the unparsed remainder is read inside it. Reading it later
+        // sees freed memory, which looks like "nothing left" and lets a second statement
+        // through.
+        var prepared: OpaquePointer?
+        var hasSecondStatement = false
+        let accepted: Bool = trimmed.withCString { text in
+            var tail: UnsafePointer<CChar>?
+            guard sqlite3_prepare_v2(handle, text, -1, &prepared, &tail) == SQLITE_OK else {
+                return false
+            }
+            // What follows is either nothing, a semicolon, a comment, or a second
+            // statement. Asking SQLite settles it: preparing the remainder gives no
+            // statement for the first three and a statement for the last.
+            guard let tail else { return true }
+            var second: OpaquePointer?
+            let code = sqlite3_prepare_v2(handle, tail, -1, &second, nil)
+            if code != SQLITE_OK || second != nil { hasSecondStatement = true }
+            sqlite3_finalize(second)
+            return true
+        }
+        guard accepted, let statement = prepared else {
+            let detail = String(cString: sqlite3_errmsg(handle))
+            sqlite3_finalize(prepared)
+            throw SelectRefusal.failed(detail)
+        }
+        defer { sqlite3_finalize(statement) }
+
+        guard !hasSecondStatement else { throw SelectRefusal.notASingleSelect }
+        guard sqlite3_stmt_readonly(statement) != 0 else { throw SelectRefusal.notReadOnly }
+
+        // The progress handler only runs between VM steps, so one function call such as
+        // zeroblob(400000000) is never interrupted. Capping the size of any value the
+        // statement can build bounds that. Restored afterwards because the same
+        // connection type reads WhatsApp's own large blobs elsewhere.
+        let previousLengthLimit = sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, 10_000_000)
+        defer { sqlite3_limit(handle, SQLITE_LIMIT_LENGTH, previousLengthLimit) }
+
+        let deadline = Deadline(limit: timeLimit)
+        let result: SelectedRows = try withExtendedLifetime(deadline) {
+            sqlite3_progress_handler(
+                handle, 1000,
+                { context in
+                    guard let context else { return 0 }
+                    return Unmanaged<Deadline>.fromOpaque(context).takeUnretainedValue().expired
+                        ? 1 : 0
+                }, Unmanaged.passUnretained(deadline).toOpaque())
+            defer { sqlite3_progress_handler(handle, 0, nil, nil) }
+
+            let columnCount = sqlite3_column_count(statement)
+            var result = SelectedRows(
+                columns: (0..<columnCount).map { String(cString: sqlite3_column_name(statement, $0)) },
+                rows: [], truncated: false)
+
+            var totalCharacters = 0
+            // Even one row of very wide cells must fit the cap, so shrink the cells.
+            let cellLength = max(20, min(maxCellLength, maxTotalCharacters / max(1, Int(columnCount))))
+            while true {
+                switch sqlite3_step(statement) {
+                case SQLITE_ROW:
+                    if result.rows.count == maxRows {
+                        result.truncated = true
+                        return result
+                    }
+                    let row = (0..<columnCount).map {
+                        Self.render(statement, $0, maxLength: cellLength)
+                    }
+                    // Rows and cells are capped, but a statement can still name thousands
+                    // of columns; this bounds the answer as a whole.
+                    totalCharacters += row.reduce(0) { $0 + $1.count }
+                    if totalCharacters > maxTotalCharacters, !result.rows.isEmpty {
+                        result.truncated = true
+                        return result
+                    }
+                    result.rows.append(row)
+                case SQLITE_DONE:
+                    return result
+                case SQLITE_INTERRUPT:
+                    throw SelectRefusal.timedOut
+                default:
+                    throw SelectRefusal.failed(String(cString: sqlite3_errmsg(handle)))
+                }
+            }
+        }
+        return result
+    }
+
+    /// Text as text, numbers as numbers, and a blob as its size: bytes of a WhatsApp
+    /// protobuf are never going to be useful pasted into a chat window.
+    private static func render(_ statement: OpaquePointer, _ index: Int32, maxLength: Int) -> String {
+        switch sqlite3_column_type(statement, index) {
+        case SQLITE_NULL:
+            return "NULL"
+        case SQLITE_INTEGER:
+            return String(sqlite3_column_int64(statement, index))
+        case SQLITE_FLOAT:
+            return String(sqlite3_column_double(statement, index))
+        case SQLITE_BLOB:
+            return "<blob \(sqlite3_column_bytes(statement, index)) bytes>"
+        default:
+            guard let pointer = sqlite3_column_text(statement, index) else { return "NULL" }
+            let text = String(cString: pointer)
+            return text.count > maxLength ? String(text.prefix(maxLength)) + "…" : text
+        }
+    }
+
+    private final class Deadline {
+        private let end: Date
+        init(limit: TimeInterval) { end = Date(timeIntervalSinceNow: limit) }
+        var expired: Bool { Date() > end }
+    }
+
     /// One row, valid only for the duration of the callback that receives it.
     struct Row {
         let statement: OpaquePointer
@@ -176,6 +341,7 @@ enum SQLiteBinding {
     case text(String)
     case int(Int64)
     case double(Double)
+    case null
 
     /// SQLITE_TRANSIENT: SQLite must copy the bytes, because the Swift string backing
     /// them is free to be deallocated the moment this function returns.
@@ -190,6 +356,8 @@ enum SQLiteBinding {
             sqlite3_bind_int64(statement, index, value)
         case .double(let value):
             sqlite3_bind_double(statement, index, value)
+        case .null:
+            sqlite3_bind_null(statement, index)
         }
     }
 }

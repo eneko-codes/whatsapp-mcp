@@ -10,6 +10,9 @@ public enum ToolError: Error, Equatable {
     case messageNotFound(id: Int64)
     case notAGroup(id: Int64, kind: ChatKind)
     case storeFailure(String)
+    case databaseNotAllowed(String)
+    case queryRefused(String)
+    case explorerUnavailable
 
     public var message: String {
         switch self {
@@ -63,6 +66,21 @@ public enum ToolError: Error, Equatable {
 
         case .storeFailure(let detail):
             return "WhatsApp's database returned an error: \(detail)"
+
+        case .databaseNotAllowed(let name):
+            return """
+                '\(name)' is not a database this server reads.
+
+                Choose one of: \(AllowedDatabase.allCases.map(\.rawValue).joined(separator: ", ")).
+                The list is fixed on purpose: WhatsApp's container also holds encryption
+                keys and other files that no tool here will open, whatever they are called.
+                """
+
+        case .queryRefused(let detail):
+            return "db_query refused the statement: \(detail)."
+
+        case .explorerUnavailable:
+            return "The database tools are not configured in this server."
         }
     }
 

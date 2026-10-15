@@ -20,7 +20,8 @@ public struct Format: Sendable {
     // MARK: Status
 
     public func status(
-        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String
+        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String,
+        snapshots: [SnapshotInfo] = []
     ) -> String {
         var lines = ["whatsapp-mcp \(WhatsAppMCPServer.version)"]
         lines.append("binary: \(binaryPath)")
@@ -64,6 +65,19 @@ public struct Format: Sendable {
         lines.append("  permission: none needed — this container is not TCC-protected")
 
         lines.append("")
+        lines.append("COPIES · private snapshots read by db_tables, db_schema and db_query")
+        if snapshots.isEmpty {
+            lines.append("  none yet — a database is copied the first time a db_* tool reads it")
+        }
+        for snapshot in snapshots {
+            var line =
+                "  \(snapshot.database.rawValue): copied \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
+            if snapshot.stale { line += " — STALE, the source has changed since" }
+            if snapshot.walPending { line += " — WhatsApp had unwritten changes pending" }
+            lines.append(line)
+        }
+
+        lines.append("")
         lines.append("This server is read-only. It has no tool that sends, edits or")
         lines.append("deletes anything, and no way to reach WhatsApp's network at all.")
 
@@ -77,6 +91,46 @@ public struct Format: Sendable {
         lines.append("  no recoverable text for a deleted message, and no link to what it replaced")
         lines.append("  no meaning for a delivery code: the number is stored, the wording is not")
 
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Raw databases
+
+    private func snapshotLine(_ snapshot: SnapshotInfo) -> String {
+        var line =
+            "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
+        if snapshot.walPending { line += " · WhatsApp had unwritten changes pending, not in the copy" }
+        return line
+    }
+
+    public func databaseTables(_ entries: [TableEntry], snapshot: SnapshotInfo) -> String {
+        var lines = [snapshotLine(snapshot), "\(entries.count) tables and views", ""]
+        lines += entries.map { "\($0.name)  [\($0.kind)]" }
+        return lines.joined(separator: "\n")
+    }
+
+    public func databaseSchema(_ statements: [String], snapshot: SnapshotInfo) -> String {
+        guard !statements.isEmpty else {
+            return snapshotLine(snapshot) + "\n\nNo such table or view in this database."
+        }
+        return ([snapshotLine(snapshot), ""] + statements.map { $0 + ";" }).joined(separator: "\n")
+    }
+
+    /// Tab-separated, because a SQL value can contain a comma and cannot contain a tab
+    /// without it being visible. A tab or newline inside a value is replaced by a space
+    /// so one row is always one line.
+    public func queryResult(_ result: QueryResult, limit: Int) -> String {
+        var lines = [snapshotLine(result.snapshot)]
+        lines.append(
+            "\(result.rows.count) row\(result.rows.count == 1 ? "" : "s")"
+                + (result.truncated ? " · more rows exist, stopped at the row limit (\(limit)) or the output size cap" : ""))
+        lines.append("")
+        lines.append(result.columns.joined(separator: "\t"))
+        for row in result.rows {
+            lines.append(
+                row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
+                    .joined(separator: "\t"))
+        }
         return lines.joined(separator: "\n")
     }
 

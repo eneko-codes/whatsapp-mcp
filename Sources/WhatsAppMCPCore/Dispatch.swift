@@ -10,11 +10,16 @@ import MCP
 /// event anywhere beneath this type, so no tool routed here can reach outside this Mac.
 public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
+    private let explorer: (any DatabaseExplorer)?
     private let calendar: Calendar
     private let format: Format
 
-    public init(store: any WhatsAppStore, calendar: Calendar = .current) {
+    public init(
+        store: any WhatsAppStore, explorer: (any DatabaseExplorer)? = nil,
+        calendar: Calendar = .current
+    ) {
         self.store = store
+        self.explorer = explorer
         self.calendar = calendar
         self.format = Format(calendar: calendar)
     }
@@ -44,7 +49,16 @@ public struct WhatsAppTools: Sendable {
         if parameters.name == ToolCatalog.statusName {
             return format.status(
                 store.databaseInfo(), availability: store.availability(),
-                binaryPath: Self.binaryPath)
+                binaryPath: Self.binaryPath, snapshots: explorer?.existingSnapshots() ?? [])
+        }
+
+        // Before the chat-store check on purpose: db_* is how a broken chat store gets
+        // diagnosed, and it reads other databases that may be perfectly fine.
+        switch parameters.name {
+        case ToolCatalog.dbTablesName, ToolCatalog.dbSchemaName, ToolCatalog.dbQueryName:
+            return try databaseTool(parameters.name, arguments)
+        default:
+            break
         }
 
         let availability = store.availability()
@@ -133,6 +147,40 @@ public struct WhatsAppTools: Sendable {
         query.kinds = requestedKinds.isEmpty ? MediaKind.allCases : requestedKinds
 
         return format.media(try await store.media(matching: query), query: query)
+    }
+
+    private func databaseTool(_ name: String, _ arguments: Arguments) throws -> String {
+        guard let explorer else { throw ToolError.explorerUnavailable }
+        let requested = try arguments.requiredString("db")
+        guard let database = AllowedDatabase(rawValue: requested) else {
+            throw ToolError.databaseNotAllowed(requested)
+        }
+        do {
+            switch name {
+            case ToolCatalog.dbTablesName:
+                let (entries, snapshot) = try explorer.tables(in: database)
+                return format.databaseTables(entries, snapshot: snapshot)
+
+            case ToolCatalog.dbSchemaName:
+                let (statements, snapshot) = try explorer.schema(
+                    of: database, table: arguments.optionalString("table"))
+                return format.databaseSchema(statements, snapshot: snapshot)
+
+            default:
+                let limit = try arguments.int(
+                    "limit", default: SnapshotDatabaseExplorer.defaultRowLimit,
+                    in: SnapshotDatabaseExplorer.rowLimitRange)
+                let result = try explorer.select(
+                    try arguments.requiredString("sql"), in: database, limit: limit)
+                return format.queryResult(result, limit: limit)
+            }
+        } catch let refusal as ReadOnlyDatabase.SelectRefusal {
+            throw ToolError.queryRefused(refusal.detail)
+        } catch let failure as SnapshotError {
+            throw ToolError.storeFailure(failure.message)
+        } catch let failure as ReadOnlyDatabase.QueryFailure {
+            throw ToolError.storeFailure(failure.detail)
+        }
     }
 
     private func group(_ arguments: Arguments) async throws -> String {

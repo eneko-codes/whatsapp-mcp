@@ -59,6 +59,18 @@
     {
       "name": "group_get",
       "description": "What this server can read about a group: when it was created and by whom, when its name last changed, and every member row with its address, resolved name and admin flag."
+    },
+    {
+      "name": "db_tables",
+      "description": "Lists the tables and views in one of WhatsApp's local databases (chat store, contacts, call history, labels, locations, stickers, status, channels and the rest). Names only, no rows."
+    },
+    {
+      "name": "db_schema",
+      "description": "Returns the CREATE statements of one WhatsApp database, or of one table and its indexes. Structure only, no rows."
+    },
+    {
+      "name": "db_query",
+      "description": "Runs one SELECT statement against one of WhatsApp's databases and returns the rows. Anything that is not a single read-only SELECT is refused; rows are capped and long statements are stopped."
     }
   ],
   "compatibility": {

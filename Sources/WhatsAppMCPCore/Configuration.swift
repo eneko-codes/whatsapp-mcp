@@ -16,7 +16,18 @@ public struct Configuration: Sendable, Equatable {
     /// run can be pointed elsewhere without the live file ever being opened.
     public var databasePath: String = Configuration.defaultDatabasePath
 
+    /// Where the private copies read by `db_*` are kept — the only place this server
+    /// writes. Overridable from the command line so a manual run or a test never touches
+    /// the real cache.
+    public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
+
     public init() {}
+
+    /// WhatsApp's container is the directory the chat database sits in, so pointing
+    /// `--database` at a copy moves every `db_*` read to that copy's directory as well.
+    public var containerDirectory: URL {
+        URL(fileURLWithPath: databasePath).deletingLastPathComponent()
+    }
 
     /// WhatsApp's group container. Not TCC-protected, unlike `~/Library/Messages`, which
     /// is what makes the whole read path possible with no grant and no prompt.
@@ -58,6 +69,15 @@ public struct Configuration: Sendable, Equatable {
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         configuration.databasePath = (trimmed as NSString).expandingTildeInPath
+                    }
+                }
+                index += 2
+
+            case "--cache-directory":
+                if let value, !isPlaceholder(value) {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        configuration.cacheDirectory = (trimmed as NSString).expandingTildeInPath
                     }
                 }
                 index += 2

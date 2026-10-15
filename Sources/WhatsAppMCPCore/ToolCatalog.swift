@@ -19,9 +19,12 @@ public enum ToolCatalog {
     public static let messageGetName = "message_get"
     public static let groupGetName = "group_get"
     public static let mediaName = "media_list"
+    public static let dbTablesName = "db_tables"
+    public static let dbSchemaName = "db_schema"
+    public static let dbQueryName = "db_query"
 
     public static func all() -> [Tool] {
-        [status, chats, chatGet, search, messageGet, groupGet, media]
+        [status, chats, chatGet, search, messageGet, groupGet, media, dbTables, dbSchema, dbQuery]
     }
 
     // MARK: Schema helpers
@@ -312,6 +315,86 @@ public enum ToolCatalog {
                     "Group chat id from chats_list.", minimum: 1, maximum: Int.max)
             ],
             required: ["chat_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    // MARK: Raw database access
+
+    private static let databaseProperty: Value = .object([
+        "type": .string("string"),
+        "enum": .array(AllowedDatabase.allCases.map { .string($0.rawValue) }),
+        "description": .string(
+            "Which of WhatsApp's databases to read. A fixed list: the container also holds "
+                + "encryption keys that no tool here opens."),
+    ])
+
+    private static let snapshotHelp = """
+        Reads a private copy of the database made in ~/Library/Caches/whatsapp-mcp and \
+        refreshed whenever WhatsApp changes the file; the answer says when the copy was \
+        taken. Rows WhatsApp has not yet written out of its journal are not in the copy.
+        """
+
+    static let dbTables = Tool(
+        name: dbTablesName,
+        title: "List database tables",
+        description: """
+            Lists the tables and views in one of WhatsApp's local databases (chat store, \
+            contacts, call history, labels, locations, stickers, status, channels and the \
+            rest). Names only, no rows.
+
+            Use it to see what exists before db_schema and db_query. \(snapshotHelp)
+            """,
+        inputSchema: object(properties: ["db": databaseProperty], required: ["db"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    static let dbSchema = Tool(
+        name: dbSchemaName,
+        title: "Read database schema",
+        description: """
+            Returns the CREATE statements of one database, or of one table and its \
+            indexes. Structure only, no rows. The schema is WhatsApp's own and \
+            undocumented, so read it rather than assuming a column name.
+
+            \(snapshotHelp)
+            """,
+        inputSchema: object(
+            properties: [
+                "db": databaseProperty,
+                "table": string("Optional table or view name from db_tables. Omit for everything."),
+            ], required: ["db"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    static let dbQuery = Tool(
+        name: dbQueryName,
+        title: "Query a database",
+        description: """
+            Runs one SELECT (or WITH … SELECT) statement against one of WhatsApp's \
+            databases and returns the rows as tab-separated text, with a blob shown as its \
+            size. Anything else is refused: a second statement, ATTACH, PRAGMA, and any \
+            statement that would change data. Rows are capped and a long-running statement \
+            is stopped.
+
+            This is the escape hatch for what the dedicated tools do not cover. Prefer \
+            chats_list, chat_get and media_list for ordinary reading, and call db_schema \
+            first — column names are WhatsApp's and change between versions. \(snapshotHelp)
+            """,
+        inputSchema: object(
+            properties: [
+                "db": databaseProperty,
+                "sql": string("A single SELECT or WITH … SELECT statement."),
+                "limit": integer(
+                    "Maximum rows to return.", minimum: SnapshotDatabaseExplorer.rowLimitRange.lowerBound,
+                    maximum: SnapshotDatabaseExplorer.rowLimitRange.upperBound,
+                    default: SnapshotDatabaseExplorer.defaultRowLimit),
+            ], required: ["db", "sql"]),
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,
             openWorldHint: false)
