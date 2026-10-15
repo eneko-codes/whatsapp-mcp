@@ -61,6 +61,30 @@
       "description": "What this server can read about a group: when it was created and by whom, when its name last changed, and every member row with its address, resolved name and admin flag."
     },
     {
+      "name": "calls_list",
+      "description": "Lists voice and video calls from WhatsApp's call history: when, how long, direction, missed or not, video or voice, group and participants. The outcome is the stored number, not a guessed meaning."
+    },
+    {
+      "name": "location_sharing_list",
+      "description": "Lists live-location sharing sessions you started and who they were shared with. Coordinates are not decoded."
+    },
+    {
+      "name": "labels_list",
+      "description": "Lists WhatsApp Business labels and how many chats carry each; with a label id, lists what carries it."
+    },
+    {
+      "name": "address_book_list",
+      "description": "Looks up people in WhatsApp's own copy of your address book: names, business name, phone number, LID, username and about text."
+    },
+    {
+      "name": "lid_lookup",
+      "description": "Given a LID or phone number, returns every pairing and name WhatsApp recorded for it, each labelled with the table it came from."
+    },
+    {
+      "name": "channels_list",
+      "description": "Lists WhatsApp channels this Mac knows about: address, name and who added it."
+    },
+    {
       "name": "db_tables",
       "description": "Lists the tables and views in one of WhatsApp's local databases (chat store, contacts, call history, labels, locations, stickers, status, channels and the rest). Names only, no rows."
     },

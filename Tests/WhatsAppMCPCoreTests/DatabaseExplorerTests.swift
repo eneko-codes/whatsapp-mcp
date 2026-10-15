@@ -10,7 +10,7 @@ import Testing
 /// Every table, row and name here is invented. The owner's real container is never opened,
 /// and the cache lives beside the fake container, so no test touches
 /// `~/Library/Caches/whatsapp-mcp` either.
-private struct FakeContainer {
+struct FakeContainer {
     let root: URL
     var container: URL { root.appendingPathComponent("container") }
     var cache: URL { root.appendingPathComponent("cache") }
@@ -41,7 +41,7 @@ private struct FakeContainer {
         try run(sourceURL(database), ["INSERT INTO ZINVENTED (ZNAME) VALUES ('\(row)')"])
     }
 
-    private func run(_ url: URL, _ statements: [String]) throws {
+    func run(_ url: URL, _ statements: [String]) throws {
         var handle: OpaquePointer?
         guard sqlite3_open(url.path, &handle) == SQLITE_OK, let handle else {
             throw NSError(domain: "fixture", code: 1)
@@ -60,8 +60,18 @@ private struct FakeContainer {
     }
 
     func tools() -> WhatsAppTools {
-        WhatsAppTools(
-            store: FakeWhatsAppStore(), explorer: explorer(), calendar: Fixtures.calendar)
+        let cache = SnapshotCache(containerDirectory: container, cacheDirectory: cache)
+        return WhatsAppTools(
+            store: FakeWhatsAppStore(), explorer: SnapshotDatabaseExplorer(cache: cache),
+            reader: SnapshotDomainReader(cache: cache), calendar: Fixtures.calendar)
+    }
+
+    /// Builds a database from invented DDL and rows, shaped like WhatsApp's own.
+    func build(_ database: AllowedDatabase, _ statements: [String]) throws {
+        let url = sourceURL(database)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try run(url, statements)
     }
 
     /// Every file under the container with its modification time and contents, so a test
@@ -82,7 +92,7 @@ private struct FakeContainer {
     }
 }
 
-private func call(
+func call(
     _ tools: WhatsAppTools, _ name: String, _ arguments: [String: Value]
 ) async -> (text: String, isError: Bool) {
     let result = await tools.handle(.init(name: name, arguments: arguments))

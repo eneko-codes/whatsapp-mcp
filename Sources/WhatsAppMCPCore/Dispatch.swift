@@ -11,15 +11,17 @@ import MCP
 public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?
+    private let reader: (any DomainReader)?
     private let calendar: Calendar
     private let format: Format
 
     public init(
         store: any WhatsAppStore, explorer: (any DatabaseExplorer)? = nil,
-        calendar: Calendar = .current
+        reader: (any DomainReader)? = nil, calendar: Calendar = .current
     ) {
         self.store = store
         self.explorer = explorer
+        self.reader = reader
         self.calendar = calendar
         self.format = Format(calendar: calendar)
     }
@@ -57,6 +59,9 @@ public struct WhatsAppTools: Sendable {
         switch parameters.name {
         case ToolCatalog.dbTablesName, ToolCatalog.dbSchemaName, ToolCatalog.dbQueryName:
             return try databaseTool(parameters.name, arguments)
+        case ToolCatalog.callsName, ToolCatalog.locationSharingName, ToolCatalog.labelsName,
+            ToolCatalog.addressBookName, ToolCatalog.lidLookupName, ToolCatalog.channelsName:
+            return try domainTool(parameters.name, arguments)
         default:
             break
         }
@@ -147,6 +152,67 @@ public struct WhatsAppTools: Sendable {
         query.kinds = requestedKinds.isEmpty ? MediaKind.allCases : requestedKinds
 
         return format.media(try await store.media(matching: query), query: query)
+    }
+
+    private func domainTool(_ name: String, _ arguments: Arguments) throws -> String {
+        guard let reader else { throw ToolError.explorerUnavailable }
+        let limit = try arguments.int(
+            "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
+        do {
+            switch name {
+            case ToolCatalog.callsName:
+                var query = CallQuery()
+                query.after = try arguments.optionalDate("after")
+                query.before = try arguments.optionalDate("before")
+                if let after = query.after, let before = query.before, before < after {
+                    throw ToolError.rangeInverted
+                }
+                query.newestFirst = try arguments.newestFirst()
+                query.limit = limit
+                query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
+                let (calls, snapshot) = try reader.calls(matching: query)
+                return format.calls(calls, snapshot: snapshot)
+
+            case ToolCatalog.locationSharingName:
+                let (sharing, snapshot) = try reader.locationSharing(limit: limit)
+                return format.locationSharing(sharing, snapshot: snapshot)
+
+            case ToolCatalog.labelsName:
+                if let id = try arguments.optionalInt("label_id") {
+                    let (label, entities, snapshot) = try reader.labeledEntities(
+                        labelID: id, limit: limit)
+                    guard let label else {
+                        throw ToolError.badArgument(
+                            name: "label_id", reason: "no label has id \(id); call labels_list without it")
+                    }
+                    return format.labeledEntities(entities, label: label, snapshot: snapshot)
+                }
+                let (labels, snapshot) = try reader.labels()
+                return format.labels(labels, snapshot: snapshot)
+
+            case ToolCatalog.addressBookName:
+                var query = AddressBookQuery()
+                query.name = arguments.optionalString("name")
+                query.limit = limit
+                query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
+                let (entries, snapshot) = try reader.addressBook(matching: query)
+                return format.addressBook(entries, snapshot: snapshot)
+
+            case ToolCatalog.lidLookupName:
+                let value = try arguments.requiredString("value")
+                let (matches, snapshots, notes) = try reader.lidLookup(value)
+                return format.lidMatches(matches, value: value, snapshots: snapshots, notes: notes)
+
+            default:
+                let (channels, snapshot) = try reader.channels(
+                    name: arguments.optionalString("name"), limit: limit)
+                return format.channels(channels, snapshot: snapshot)
+            }
+        } catch let failure as SnapshotError {
+            throw ToolError.storeFailure(failure.message)
+        } catch let failure as ReadOnlyDatabase.QueryFailure {
+            throw ToolError.storeFailure(failure.detail)
+        }
     }
 
     private func databaseTool(_ name: String, _ arguments: Arguments) throws -> String {

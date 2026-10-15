@@ -96,7 +96,7 @@ public struct Format: Sendable {
 
     // MARK: Raw databases
 
-    private func snapshotLine(_ snapshot: SnapshotInfo) -> String {
+    func snapshotLine(_ snapshot: SnapshotInfo) -> String {
         var line =
             "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
         if snapshot.walPending { line += " · WhatsApp had unwritten changes pending, not in the copy" }
@@ -130,6 +130,139 @@ public struct Format: Sendable {
             lines.append(
                 row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
                     .joined(separator: "\t"))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Beyond the chat store
+
+    private func when(_ date: Date?) -> String {
+        date.map { DateParsing.roundTrip($0, calendar: calendar) } ?? "unknown time"
+    }
+
+    private func header(_ snapshot: SnapshotInfo, _ count: String) -> [String] {
+        [snapshotLine(snapshot), count, ""]
+    }
+
+    public func calls(_ calls: [CallEvent], snapshot: SnapshotInfo) -> String {
+        guard !calls.isEmpty else { return snapshotLine(snapshot) + "\n\nNo calls found." }
+        var lines = header(snapshot, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
+        for call in calls {
+            var parts = ["\(call.id)  \(when(call.date))"]
+            if let incoming = call.incoming { parts.append(incoming ? "incoming" : "outgoing") }
+            if let video = call.video { parts.append(video ? "video" : "voice") }
+            if call.missed == true { parts.append("missed") }
+            if let seconds = call.durationSeconds {
+                parts.append("duration \(Int(seconds.rounded()))s")
+            }
+            if let code = call.outcomeCode { parts.append("outcome code \(code)") }
+            if let code = call.missedReasonCode, call.missed == true {
+                parts.append("missed-reason code \(code)")
+            }
+            if let group = call.groupJID { parts.append("group \(group)") }
+            if let creator = call.creatorJID { parts.append("started by \(creator)") }
+            if !call.participants.isEmpty {
+                parts.append("with " + call.participants.map(\.jid).joined(separator: ", "))
+            }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func locationSharing(_ sharing: LocationSharing, snapshot: SnapshotInfo) -> String {
+        var lines = header(
+            snapshot,
+            "\(sharing.outgoing.count) sharing session(s) you started, "
+                + "\(sharing.recipients.count) recipient row(s)")
+        for item in sharing.outgoing {
+            lines.append(
+                "shared in \(item.chat ?? "unknown chat") · from \(when(item.started)) · until "
+                    + "\(when(item.ends))" + (item.participant.map { " · as \($0)" } ?? ""))
+        }
+        for item in sharing.recipients {
+            lines.append(
+                "recipient \(item.jid ?? "unknown") in \(item.chat ?? "unknown chat") · expires "
+                    + when(item.expires))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func labels(_ labels: [Label], snapshot: SnapshotInfo) -> String {
+        guard !labels.isEmpty else {
+            return snapshotLine(snapshot)
+                + "\n\nNo labels. Labels exist only on accounts that use them."
+        }
+        var lines = header(snapshot, "\(labels.count) label\(labels.count == 1 ? "" : "s")")
+        for label in labels {
+            var line = "\(label.id)  \(label.name ?? "(unnamed)")"
+            if let colour = label.colorID { line += " · colour id \(colour)" }
+            if label.active == false { line += " · inactive" }
+            line += " · \(label.labeledCount) labelled"
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func labeledEntities(_ entities: [LabeledEntity], label: Label, snapshot: SnapshotInfo)
+        -> String
+    {
+        var lines = header(
+            snapshot, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
+        for entity in entities {
+            lines.append(
+                "\(entity.contactJID ?? entity.entityKey ?? "unknown")"
+                    + (entity.entityType.map { " · entity type \($0)" } ?? "")
+                    + " · \(when(entity.date))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func addressBook(_ entries: [AddressBookEntry], snapshot: SnapshotInfo) -> String {
+        guard !entries.isEmpty else { return snapshotLine(snapshot) + "\n\nNo entries found." }
+        var lines = header(snapshot, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
+        for entry in entries {
+            var parts = ["\(entry.id)  \(entry.fullName ?? entry.businessName ?? "(no name)")"]
+            if entry.fullName != nil, let business = entry.businessName { parts.append("business \(business)") }
+            if let phone = entry.phoneNumber { parts.append("phone \(phone)") }
+            if let lid = entry.lid { parts.append("lid \(lid)") }
+            if let id = entry.whatsappID { parts.append("whatsapp id \(id)") }
+            if let username = entry.username { parts.append("username \(username)") }
+            if let about = entry.about { parts.append("about: \(about)") }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func lidMatches(
+        _ matches: [LIDMatch], value: String, snapshots: [SnapshotInfo], notes: [String] = []
+    ) -> String {
+        var lines = snapshots.map(snapshotLine) + notes.map { "NOTE: \($0)" }
+        lines.append("\(matches.count) record(s) for '\(value)'")
+        lines.append("")
+        if matches.isEmpty {
+            lines.append(
+                "WhatsApp stored nothing for this value on this Mac. That is not proof that no "
+                    + "pairing exists: coverage of these tables has not been measured.")
+        }
+        for match in matches {
+            var parts = [match.source]
+            if let lid = match.lid { parts.append("lid \(lid)") }
+            if let phone = match.phoneNumber { parts.append("phone \(phone)") }
+            if let name = match.displayName { parts.append("name \(name)") }
+            if let push = match.pushName { parts.append("push name \(push)") }
+            if let username = match.username { parts.append("username \(username)") }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func channels(_ channels: [Channel], snapshot: SnapshotInfo) -> String {
+        guard !channels.isEmpty else { return snapshotLine(snapshot) + "\n\nNo channels found." }
+        var lines = header(snapshot, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
+        for channel in channels {
+            var line = "\(channel.name ?? "(unnamed)") · \(channel.jid)"
+            if let by = channel.addedByName ?? channel.addedByLID { line += " · added by \(by)" }
+            lines.append(line)
         }
         return lines.joined(separator: "\n")
     }

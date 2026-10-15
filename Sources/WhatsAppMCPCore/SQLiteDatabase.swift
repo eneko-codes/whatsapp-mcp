@@ -139,6 +139,7 @@ final class ReadOnlyDatabase {
         case notASingleSelect
         case notReadOnly
         case timedOut
+        case blocked
         case failed(String)
 
         var detail: String {
@@ -148,6 +149,8 @@ final class ReadOnlyDatabase {
                 "only one SELECT (or WITH … SELECT) statement is accepted, with no leading comment"
             case .notReadOnly: "the statement would change the database"
             case .timedOut: "the statement ran past its time limit and was stopped"
+            case .blocked:
+                "the statement reads key material or raw protocol queues, which no tool here returns"
             case .failed(let detail): detail
             }
         }
@@ -190,6 +193,12 @@ final class ReadOnlyDatabase {
         // closure returns, so the unparsed remainder is read inside it. Reading it later
         // sees freed memory, which looks like "nothing left" and lets a second statement
         // through.
+        // Columns and tables that hold key material or undecrypted protocol payloads are
+        // refused at prepare time, whatever the statement does with them — hex(), CAST and
+        // a subquery all go through the same read. See `blockedReads`.
+        sqlite3_set_authorizer(handle, authorizeRead, nil)
+        defer { sqlite3_set_authorizer(handle, nil, nil) }
+
         var prepared: OpaquePointer?
         var hasSecondStatement = false
         let accepted: Bool = trimmed.withCString { text in
@@ -210,7 +219,8 @@ final class ReadOnlyDatabase {
         guard accepted, let statement = prepared else {
             let detail = String(cString: sqlite3_errmsg(handle))
             sqlite3_finalize(prepared)
-            throw SelectRefusal.failed(detail)
+            throw (detail.contains("not authorized") || detail.contains("is prohibited"))
+                ? SelectRefusal.blocked : SelectRefusal.failed(detail)
         }
         defer { sqlite3_finalize(statement) }
 
@@ -384,4 +394,52 @@ private let containsImplementation:
         let found =
             haystack.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         sqlite3_result_int(context, found ? 1 : 0)
+    }
+
+/// What `db_query` may never read, by `(table, column)`; a nil column blocks the table.
+///
+/// Chosen from the structure of the databases (never from their rows): the extended-chat
+/// store keeps feature keys in `feature_key_store.key`; the messaging-infrastructure
+/// queues hold undecrypted protocol stanzas and their decryption metadata; and the two
+/// key-value stores keep opaque blobs in `ZVALUE` that are not known to be free of
+/// secrets. A block list is the wrong tool for deciding which *files* are readable —
+/// `AllowedDatabase` does that — but it is the right one for columns inside a file that
+/// is otherwise wanted.
+let blockedReads: [(table: String, column: String?)] = [
+    ("feature_key_store", nil),
+    ("group_enc_key_mapping", nil),
+    ("unordered_queue", nil),
+    ("e2ee_queue", nil),
+    ("chat_queue", nil),
+    ("ZWAKEYVALUEELEMENT", "ZVALUE"),
+    ("message_conditional_reveal", nil),
+    // Media decryption keys, wherever they sit ("*" is any table).
+    ("*", "ZMEDIAKEY"),
+    ("extended_media_item", "media_key"),
+    // Undecrypted payloads and opaque account blobs.
+    ("pending_messages", "pending_message_data"),
+    ("orphan_message_store", "orphan_content"),
+    ("orphan_message_store", "orphan_message_stanza"),
+    ("ai_thread_info", "mode_metadata"),
+    ("ZWAZACCOUNT", "ZADDITIONALDATA"),
+    // Page-level statistics per table: no content, but they size what is blocked above.
+    ("dbstat", nil),
+]
+
+/// `SQLITE_READ` is action 20; arguments 1 and 2 are the table and column. A bare C
+/// function with no captured state, as SQLite requires.
+private let authorizeRead:
+    @convention(c) (
+        UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+        UnsafePointer<CChar>?, UnsafePointer<CChar>?
+    ) -> Int32 = { _, action, tableName, columnName, _, _ in
+        guard action == SQLITE_READ, let tableName else { return SQLITE_OK }
+        let table = String(cString: tableName)
+        let column = columnName.map { String(cString: $0) }
+        let blocked = blockedReads.contains { rule in
+            (rule.table == "*" || rule.table.caseInsensitiveCompare(table) == .orderedSame)
+                && (rule.column == nil
+                    || rule.column?.caseInsensitiveCompare(column ?? "") == .orderedSame)
+        }
+        return blocked ? SQLITE_DENY : SQLITE_OK
     }

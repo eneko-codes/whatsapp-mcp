@@ -49,15 +49,16 @@ public enum WhatsAppMCPServer {
     public static func run(
         store: (any WhatsAppStore)? = nil,
         explorer: (any DatabaseExplorer)? = nil,
+        reader: (any DomainReader)? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
+        let cache = SnapshotCache(
+            containerDirectory: configuration.containerDirectory,
+            cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))
         let tools = WhatsAppTools(
             store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
-            explorer: explorer
-                ?? SnapshotDatabaseExplorer(
-                    cache: SnapshotCache(
-                        containerDirectory: configuration.containerDirectory,
-                        cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))))
+            explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
+            reader: reader ?? SnapshotDomainReader(cache: cache))
         let server = Server(
             name: name,
             version: version,

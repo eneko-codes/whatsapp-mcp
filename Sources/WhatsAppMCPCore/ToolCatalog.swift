@@ -19,12 +19,18 @@ public enum ToolCatalog {
     public static let messageGetName = "message_get"
     public static let groupGetName = "group_get"
     public static let mediaName = "media_list"
+    public static let callsName = "calls_list"
+    public static let locationSharingName = "location_sharing_list"
+    public static let labelsName = "labels_list"
+    public static let addressBookName = "address_book_list"
+    public static let lidLookupName = "lid_lookup"
+    public static let channelsName = "channels_list"
     public static let dbTablesName = "db_tables"
     public static let dbSchemaName = "db_schema"
     public static let dbQueryName = "db_query"
 
     public static func all() -> [Tool] {
-        [status, chats, chatGet, search, messageGet, groupGet, media, dbTables, dbSchema, dbQuery]
+        [status, chats, chatGet, search, messageGet, groupGet, media, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
     }
 
     // MARK: Schema helpers
@@ -318,6 +324,126 @@ public enum ToolCatalog {
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,
             openWorldHint: false)
+    )
+
+    // MARK: Beyond the chat store
+
+    private static let copyNote = """
+        Read from a private copy of the database kept in ~/Library/Caches/whatsapp-mcp; the \
+        answer says when it was taken.
+        """
+
+    static let calls = Tool(
+        name: callsName,
+        title: "List calls",
+        description: """
+            Lists voice and video calls from WhatsApp's call history: when, how long, \
+            incoming or outgoing, missed or not, video or voice, the group if it was a \
+            group call, and the participants' addresses.
+
+            The outcome is reported as the number WhatsApp stored. Which number means \
+            answered, declined or failed has not been established, and is not guessed. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "after": afterProperty,
+            "before": beforeProperty,
+            "order": orderProperty,
+            "limit": limitProperty,
+            "offset": offsetProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let locationSharing = Tool(
+        name: locationSharingName,
+        title: "List live-location sharing",
+        description: """
+            Lists live-location sharing sessions: the ones you started (chat, when, when \
+            they end) and who they were shared with. Coordinates are not included — they \
+            sit in a binary field this server does not decode. A location sent as an \
+            ordinary message is in chat_get and media_list, with its coordinates.
+
+            \(copyNote)
+            """,
+        inputSchema: object(properties: ["limit": limitProperty]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let labels = Tool(
+        name: labelsName,
+        title: "List labels",
+        description: """
+            Lists WhatsApp Business labels with their id, name, colour id and how many chats \
+            or contacts carry each. With 'label_id', lists what carries that label.
+
+            Labels exist only on accounts that use them; an empty list is normal. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "label_id": integer(
+                "Optional label id from this tool's own list. Omit to list the labels.",
+                minimum: 0, maximum: Int.max),
+            "limit": limitProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let addressBook = Tool(
+        name: addressBookName,
+        title: "Search WhatsApp's address book",
+        description: """
+            Looks up people in WhatsApp's own copy of your address book: full, given and last \
+            name, business name, phone number, LID, WhatsApp id, username and 'about' text. \
+            Matching ignores case and accents.
+
+            This is WhatsApp's table, not Apple Contacts, and the two can disagree. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "name": string("Optional text to match against names and the phone number."),
+            "limit": limitProperty,
+            "offset": offsetProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let lidLookup = Tool(
+        name: lidLookupName,
+        title: "Look up a LID or phone number",
+        description: """
+            Given a …@lid address or a phone number, returns every pairing and name WhatsApp \
+            recorded for it in its LID and extended-chat databases, each labelled with the \
+            table it came from.
+
+            No result means WhatsApp stored no pairing for that value on this Mac, not that \
+            none exists. Coverage of these tables has not been measured. \(copyNote)
+            """,
+        inputSchema: object(
+            properties: [
+                "value": string("A LID (with or without @lid) or a phone number (digits).")
+            ], required: ["value"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let channels = Tool(
+        name: channelsName,
+        title: "List channels",
+        description: """
+            Lists WhatsApp channels this Mac knows about: address, name, and who added \
+            it. Matching on the name ignores case and accents. \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "name": string("Optional text to match against the channel name."),
+            "limit": limitProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
     )
 
     // MARK: Raw database access
