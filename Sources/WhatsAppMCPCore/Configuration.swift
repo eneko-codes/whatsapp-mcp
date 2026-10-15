@@ -21,6 +21,10 @@ public struct Configuration: Sendable, Equatable {
     /// the real cache.
     public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
 
+    /// The `ffmpeg` that converts audio macOS cannot open (WhatsApp voice notes are Ogg Opus).
+    /// Nil means "look in Homebrew's two prefixes"; a path given here is used as it is.
+    public var ffmpegPath: String?
+
     public init() {}
 
     /// WhatsApp's container is the directory the chat database sits in, so pointing
@@ -69,6 +73,15 @@ public struct Configuration: Sendable, Equatable {
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         configuration.databasePath = (trimmed as NSString).expandingTildeInPath
+                    }
+                }
+                index += 2
+
+            case "--ffmpeg":
+                if let value, !isPlaceholder(value) {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        configuration.ffmpegPath = (trimmed as NSString).expandingTildeInPath
                     }
                 }
                 index += 2

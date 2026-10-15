@@ -138,7 +138,7 @@ private func makePDF(text: String?, pages: Int = 1) -> Data {
         """.utf8)
 }
 
-private func makeVideo(at url: URL) async throws {
+func makeVideo(at url: URL) async throws {
     let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
     let input = AVAssetWriterInput(
         mediaType: .video,

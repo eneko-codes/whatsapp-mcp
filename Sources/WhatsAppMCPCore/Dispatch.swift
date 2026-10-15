@@ -13,18 +13,20 @@ public struct WhatsAppTools: Sendable {
     private let explorer: (any DatabaseExplorer)?
     private let reader: (any DomainReader)?
     private let mediaFiles: MediaFiles?
+    private let transcription: TranscriptionService?
     private let calendar: Calendar
     private let format: Format
 
     public init(
         store: any WhatsAppStore, explorer: (any DatabaseExplorer)? = nil,
         reader: (any DomainReader)? = nil, mediaFiles: MediaFiles? = nil,
-        calendar: Calendar = .current
+        transcription: TranscriptionService? = nil, calendar: Calendar = .current
     ) {
         self.store = store
         self.explorer = explorer
         self.reader = reader
         self.mediaFiles = mediaFiles
+        self.transcription = transcription
         self.calendar = calendar
         self.format = Format(calendar: calendar)
     }
@@ -71,6 +73,11 @@ public struct WhatsAppTools: Sendable {
         switch parameters.name {
         case ToolCatalog.dbTablesName, ToolCatalog.dbSchemaName, ToolCatalog.dbQueryName:
             return try databaseTool(parameters.name, arguments)
+        // By path it needs no chat store at all, and by message id the store raises its own
+        // error, so the availability check above would only hide the reason.
+        case ToolCatalog.audioTranscribeName:
+            return try await audioTranscribe(arguments)
+
         case ToolCatalog.callsName, ToolCatalog.locationSharingName, ToolCatalog.labelsName,
             ToolCatalog.addressBookName, ToolCatalog.lidLookupName, ToolCatalog.channelsName:
             return try domainTool(parameters.name, arguments)
@@ -198,6 +205,48 @@ public struct WhatsAppTools: Sendable {
         return (message, attachment, url)
     }
 
+    private func audioTranscribe(_ arguments: Arguments) async throws -> String {
+        guard let transcription else {
+            throw ToolError.mediaProblem("Transcription is not configured in this server.")
+        }
+        let messageID = try arguments.optionalInt("message_id")
+        let path = arguments.optionalString("path")
+        guard (messageID == nil) != (path == nil) else {
+            throw ToolError.badArgument(
+                name: "message_id", reason: "give exactly one of 'message_id' and 'path'")
+        }
+
+        var heading: String?
+        let url: URL
+        if let path {
+            guard let resolved = mediaFiles?.contained(path) else {
+                throw ToolError.mediaProblem(
+                    "That path is not a file inside WhatsApp's Message folder, so it is not opened.")
+            }
+            url = resolved
+        } else {
+            let (message, attachment, resolved) = try await attachment(
+                Arguments(["message_id": .int(Int(messageID ?? 0))], calendar: calendar))
+            guard [.voiceNote, .audioFile, .video].contains(attachment.kind) else {
+                throw ToolError.mediaProblem(
+                    "Message \(message.id) is a \(MediaKind(attachment.kind).rawValue), which has no sound to transcribe.")
+            }
+            guard let resolved else { return format.mediaMissing(message, attachment: attachment) }
+            heading = format.mediaHeading(message, attachment: attachment)
+            url = resolved
+        }
+
+        do {
+            let result = try await transcription.transcribe(
+                file: url, language: try arguments.requiredString("language"))
+            return format.transcription(result, heading: heading)
+        } catch let failure as TranscriptionError {
+            throw ToolError.mediaProblem(failure.message)
+        } catch let failure as MediaFiles.ViewError {
+            throw ToolError.mediaProblem("The file could not be opened: \(failure).")
+        }
+    }
+
     private func mediaGet(_ arguments: Arguments) async throws -> String {
         let (message, attachment, url) = try await attachment(arguments)
         guard let url else { return format.mediaMissing(message, attachment: attachment) }
@@ -230,10 +279,24 @@ public struct WhatsAppTools: Sendable {
                 var content: [Tool.Content] = frames.map {
                     .image(data: $0.base64EncodedString(), mimeType: "image/jpeg", annotations: nil, _meta: nil)
                 }
-                content.append(
-                    text(
-                        heading + "\n\(frames.count) frames, evenly spaced over \(Int(seconds.rounded())) s. "
-                            + "For what is said, use audio_transcribe with this message id."))
+                var summary = heading + "\n\(frames.count) frames, evenly spaced over \(Int(seconds.rounded())) s."
+                // Best effort and only when asked: the frames are the answer and the sound is
+                // an addition, so anything that goes wrong here is a note and never a failure.
+                // No language means no transcript, because macOS cannot detect one.
+                if let language = arguments.optionalString("language"), let transcription {
+                    do {
+                        let result = try await transcription.transcribe(file: url, language: language)
+                        summary += "\n\n" + format.transcription(result, heading: nil)
+                    } catch let failure as TranscriptionError {
+                        summary += "\n\nNo transcript: "
+                            + (failure.message.split(separator: "\n").first.map(String.init) ?? "unavailable")
+                    } catch {
+                        summary += "\n\nNo transcript: \(error.localizedDescription)"
+                    }
+                } else {
+                    summary += "\nNo transcript: pass 'language' (for example es-ES), or use audio_transcribe."
+                }
+                content.append(text(summary))
                 return content
 
             case .document:

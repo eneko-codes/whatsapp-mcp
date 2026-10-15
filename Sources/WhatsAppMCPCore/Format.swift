@@ -170,6 +170,30 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    private func clock(_ seconds: Double) -> String {
+        let whole = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+
+    public func transcription(_ result: Transcription, heading: String?) -> String {
+        var lines: [String] = []
+        if let heading { lines += [heading, ""] }
+        lines.append(
+            "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition · language "
+                + "\(result.localeIdentifier) · duration \(clock(result.durationSeconds))"
+                + (result.fromCache ? " · from this server's cache" : "")
+                + " — it can contain errors.")
+        lines.append("")
+        guard !result.segments.isEmpty else {
+            lines.append("No speech was recognised.")
+            return lines.joined(separator: "\n")
+        }
+        for segment in result.segments {
+            lines.append("[\(clock(segment.start))–\(clock(segment.end))] \(segment.text)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     public func documentText(_ document: MediaFiles.PDFText, pdf: Bool) -> String {
         if document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return pdf

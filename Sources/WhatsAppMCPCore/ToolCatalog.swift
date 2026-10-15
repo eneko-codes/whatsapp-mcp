@@ -21,6 +21,7 @@ public enum ToolCatalog {
     public static let mediaName = "media_list"
     public static let mediaGetName = "media_get"
     public static let mediaViewName = "media_view"
+    public static let audioTranscribeName = "audio_transcribe"
     public static let callsName = "calls_list"
     public static let locationSharingName = "location_sharing_list"
     public static let labelsName = "labels_list"
@@ -32,7 +33,7 @@ public enum ToolCatalog {
     public static let dbQueryName = "db_query"
 
     public static func all() -> [Tool] {
-        [status, chats, chatGet, search, messageGet, groupGet, media, mediaGet, mediaView, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
+        [status, chats, chatGet, search, messageGet, groupGet, media, mediaGet, mediaView, audioTranscribe, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
     }
 
     // MARK: Schema helpers
@@ -373,9 +374,44 @@ public enum ToolCatalog {
                 "frames": integer(
                     "For a video: how many still frames to return.", minimum: 1, maximum: 8,
                     default: 4),
+                "language": string(
+                    "For a video: the language spoken, a full tag such as es-ES. Without it the "
+                        + "frames come back with no transcript."),
             ], required: ["message_id"]),
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let audioTranscribe = Tool(
+        name: audioTranscribeName,
+        title: "Transcribe audio",
+        description: """
+            Turns a voice note, audio file or a video's sound into text, with times, using \
+            the speech recognition built into macOS. It runs entirely on this Mac: nothing \
+            is sent anywhere, and no language model is ever downloaded.
+
+            Give a 'message_id' (from media_list) or a 'path' under WhatsApp's Message \
+            folder — one of them — and the 'language' as a full tag (es-ES, en-US). macOS \
+            cannot detect the language, so it is required, and a bare "es" or "en" is \
+            refused when several regional models exist: text recognised in the wrong \
+            language or accent is fluent nonsense. Basque (eu) and Catalan (ca) are not \
+            supported by macOS for this engine, and the answer says so instead of guessing.
+
+            The result is an automatic transcription and can contain errors. Results are \
+            kept in ~/Library/Caches/whatsapp-mcp so the same audio is recognised once. \
+            WhatsApp voice notes are Ogg Opus, which needs ffmpeg installed to convert.
+            """,
+        inputSchema: object(properties: [
+            "message_id": integer(
+                "Message id of a voice note, audio file or video, from media_list.",
+                minimum: 1, maximum: Int.max),
+            "path": string("Alternatively, a file path under WhatsApp's Message folder."),
+            "language": string(
+                "Language spoken in the audio, a full BCP-47 tag such as es-ES or en-US."),
+        ], required: ["language"]),
+        annotations: .init(
+            readOnlyHint: false, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
     )
 
     // MARK: Beyond the chat store

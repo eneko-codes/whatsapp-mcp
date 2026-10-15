@@ -50,16 +50,25 @@ public enum WhatsAppMCPServer {
         store: (any WhatsAppStore)? = nil,
         explorer: (any DatabaseExplorer)? = nil,
         reader: (any DomainReader)? = nil,
+        transcription: TranscriptionService? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
         let cache = SnapshotCache(
             containerDirectory: configuration.containerDirectory,
             cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))
+        let mediaFiles = MediaFiles(containerDirectory: configuration.containerDirectory)
         let tools = WhatsAppTools(
             store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
             explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
             reader: reader ?? SnapshotDomainReader(cache: cache),
-            mediaFiles: MediaFiles(containerDirectory: configuration.containerDirectory))
+            mediaFiles: mediaFiles,
+            transcription: transcription
+                ?? TranscriptionService(
+                    mediaFiles: mediaFiles,
+                    cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory),
+                    converter: (configuration.ffmpegPath.map { URL(fileURLWithPath: $0) }
+                        ?? FFmpegConverter.locate()).map { FFmpegConverter(executable: $0) },
+                    engine: NativeSpeechTranscriber()))
         let server = Server(
             name: name,
             version: version,

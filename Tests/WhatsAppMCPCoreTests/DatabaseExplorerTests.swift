@@ -186,6 +186,24 @@ struct SnapshotCacheTests {
             atPath: fake.cache.appendingPathComponent("ChatStorage.sqlite").path))
     }
 
+    @Test("A cache directory that already exists keeps its mode; one the server makes is private")
+    func existingCacheDirectoryIsNotChmodded() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.make(.contacts)
+        try FileManager.default.createDirectory(
+            at: fake.cache, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755])
+        _ = try SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+            .snapshot(of: .contacts)
+        let mode = try FileManager.default.attributesOfItem(atPath: fake.cache.path)[
+            .posixPermissions] as? Int
+        #expect(mode == 0o755)
+        let copyMode = try FileManager.default.attributesOfItem(
+            atPath: fake.cache.appendingPathComponent("ContactsV2.sqlite").path)[.posixPermissions] as? Int
+        #expect(copyMode == 0o600, "the copy itself must stay owner-only")
+    }
+
     @Test("The copy is reused until the source's modification time changes")
     func refreshFollowsModificationTime() throws {
         let fake = try FakeContainer()

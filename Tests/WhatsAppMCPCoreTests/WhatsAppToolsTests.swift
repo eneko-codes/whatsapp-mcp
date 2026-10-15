@@ -489,13 +489,21 @@ struct WhatsAppToolsTests {
         #expect(isError)
     }
 
+    /// The only tools allowed to say they are not read-only, and only because they keep a
+    /// result in `~/Library/Caches/whatsapp-mcp`. Naming them here means a tool that starts
+    /// writing something else has to be added to this list on purpose.
+    private static let cacheWriters: Set<String> = [ToolCatalog.audioTranscribeName]
+
     /// The whole catalogue, not a hard-coded list: a tool added later that could send,
     /// edit or delete would have to declare itself here, and this fails when it does.
-    /// This server reads and nothing else, and that is the property worth pinning.
-    @Test("Every tool in the catalogue is read-only")
+    /// This server reads WhatsApp and never changes it, and that is the property worth
+    /// pinning; the one tool that writes its own cache is named above.
+    @Test("Every tool in the catalogue is read-only, except those that only keep a cache")
     func everyToolIsReadOnly() {
         for tool in ToolCatalog.all() {
-            #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
+            if !Self.cacheWriters.contains(tool.name) {
+                #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
+            }
             #expect(tool.annotations.destructiveHint != true, "\(tool.name) claims to destroy")
             #expect(tool.annotations.openWorldHint != true, "\(tool.name) claims to leave this Mac")
         }

@@ -227,12 +227,7 @@ public struct SnapshotCache: Sendable {
         throws
     {
         let fileManager = FileManager.default
-        try fileManager.createDirectory(
-            at: cacheDirectory, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        // A cache directory that already existed keeps whatever mode it had, so say it.
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700], ofItemAtPath: cacheDirectory.path)
+        try PrivateDirectory.ensure(cacheDirectory)
 
         let temporary = cacheDirectory.appendingPathComponent(
             "\(database.cacheFileName).tmp-\(UUID().uuidString)")
