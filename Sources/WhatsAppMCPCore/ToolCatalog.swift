@@ -6,10 +6,11 @@ import MCP
 /// Claude Desktop.
 ///
 /// One tool per thing this database holds — chats, messages, one message, groups,
-/// attachments — rather than one per query somebody happened to need. Every tool here is a
-/// read, and no tool carries a verb prefix because there is no verb to warn about: this
-/// server never writes to WhatsApp's database and never sends anything anywhere. A tool
-/// that did either would be the first, and must not be added.
+/// attachments — rather than one per query somebody happened to need. Every tool reads, and
+/// no tool carries a verb prefix because there is no verb to warn about: this server never
+/// changes WhatsApp and never sends anything anywhere. Some tools also keep a result in the
+/// server's own cache (see CLAUDE.md); a tool that changed WhatsApp or sent anything would
+/// be the first, and must not be added.
 public enum ToolCatalog {
 
     public static let statusName = "whatsapp_status"
@@ -312,8 +313,8 @@ public enum ToolCatalog {
 
             Names are resolved the same way as elsewhere: WhatsApp's own profile name \
             first, a phone number for a plain phone address, otherwise the address \
-            unchanged — never through Apple Contacts. A LID address WhatsApp has never \
-            named for you stays a LID; this server has no phone number to offer for one.
+            unchanged — never from the system address book. A LID address WhatsApp has never \
+            named for you stays a LID here; the chat database has no phone number for one. lid_lookup may.
 
             Only works on group chats — call chats_list with kinds: ["group"] to find \
             one.
@@ -360,11 +361,13 @@ public enum ToolCatalog {
             Shows what is inside an attachment. A photo, sticker or GIF comes back as an \
             image, reduced to at most 1568 pixels on its longest side. A PDF (or a text \
             document) comes back as its text, capped in length; a scanned PDF has no text \
-            layer and says so. A video comes back as evenly spaced still frames. A voice \
-            note or audio file is not played: use audio_transcribe.
+            layer and says so. A video comes back as evenly spaced still frames, and with a \
+            'language' also as a transcript. A voice note or audio file is not played: \
+            use audio_transcribe.
 
             The file must be under WhatsApp's Message folder on this Mac. If it was \
-            evicted, the answer says so. Nothing is written anywhere.
+            evicted, the answer says so. The file is only read; the one thing that can be \
+            written is a video's transcript, kept in this server's own cache.
             """,
         inputSchema: object(
             properties: [
@@ -394,8 +397,9 @@ public enum ToolCatalog {
             folder — one of them — and the 'language' as a full tag (es-ES, en-US). macOS \
             cannot detect the language, so it is required, and a bare "es" or "en" is \
             refused when several regional models exist: text recognised in the wrong \
-            language or accent is fluent nonsense. Basque (eu) and Catalan (ca) are not \
-            supported by macOS for this engine, and the answer says so instead of guessing.
+            language or accent is fluent nonsense. Basque (eu) and Catalan (ca) were not \
+            in the engine's list when this was written; an unsupported language is \
+            refused with the list the engine offers, never replaced by another.
 
             The result is an automatic transcription and can contain errors. Results are \
             kept in ~/Library/Caches/whatsapp-mcp so the same audio is recognised once. \
@@ -488,7 +492,7 @@ public enum ToolCatalog {
             name, business name, phone number, LID, WhatsApp id, username and 'about' text. \
             Matching ignores case and accents.
 
-            This is WhatsApp's table, not Apple Contacts, and the two can disagree. \
+            This is WhatsApp's own table, which can disagree with any other address book. \
             \(copyNote)
             """,
         inputSchema: object(properties: [

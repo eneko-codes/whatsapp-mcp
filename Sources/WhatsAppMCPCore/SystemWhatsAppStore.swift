@@ -1,6 +1,7 @@
 import Foundation
 
-/// The only type that opens WhatsApp's own database.
+/// The only type that reads the chat store directly. `SnapshotCache` also opens WhatsApp's
+/// other databases, once each per change, to copy them.
 ///
 /// Everything above the `WhatsAppStore` protocol is driven by a fake in the tests; this
 /// file is driven by a fixture database the suite builds in a temporary directory, with

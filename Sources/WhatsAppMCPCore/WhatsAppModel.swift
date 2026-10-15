@@ -91,9 +91,11 @@ public enum IdentityKind: String, Sendable, Equatable {
 /// One party — a sender, a group's creator, a mention's target — with everything this
 /// database can say about them in one value.
 ///
-/// There is no `phoneNumber` field for a `.lid` identity and there cannot be one: the
-/// schema has no LID→phone mapping anywhere. Naming that absence in the type is the point,
-/// because the alternative is a field that is nil for a reason nobody can see.
+/// There is no `phoneNumber` field for a `.lid` identity and there cannot be one: the chat
+/// database has no LID→phone mapping. (`lid_lookup` reads separate pairing tables whose
+/// coverage is not measured, and reports what they say as their own.) Naming that absence
+/// in the type is the point, because the alternative is a field that is nil for a reason
+/// nobody can see.
 public struct Identity: Sendable, Equatable {
     public let jid: String
     /// Resolved through `JIDDisplay`: a profile name, else a `+<digits>` phone number, else

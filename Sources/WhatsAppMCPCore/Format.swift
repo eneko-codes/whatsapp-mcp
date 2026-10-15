@@ -78,15 +78,17 @@ public struct Format: Sendable {
         }
 
         lines.append("")
-        lines.append("This server is read-only. It has no tool that sends, edits or")
-        lines.append("deletes anything, and no way to reach WhatsApp's network at all.")
+        lines.append("This server never changes WhatsApp. It has no tool that sends, edits or")
+        lines.append("deletes anything, and no way to reach any network. It writes only its own")
+        lines.append("cache, ~/Library/Caches/whatsapp-mcp (copies listed above, transcripts).")
 
         // Things a caller will otherwise assume are merely missing from this server,
         // rather than absent from WhatsApp's own storage. Every one was established by
         // checking each table and column name in the schema.
         lines.append("")
         lines.append("NOT IN THIS DATABASE · things WhatsApp does not store locally")
-        lines.append("  no LID→phone mapping: a …@lid sender with no profile name stays a LID")
+        lines.append("  no LID→phone mapping in the chat database: a …@lid sender with no profile name stays "
+                    + "a LID there. lid_lookup reads separate pairing tables whose coverage is not measured")
         lines.append("  no disappearing-message setting or TTL, per chat or per message")
         lines.append("  no recoverable text for a deleted message, and no link to what it replaced")
         lines.append("  no meaning for a delivery code: the number is stored, the wording is not")

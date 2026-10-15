@@ -221,8 +221,9 @@ public struct SnapshotCache: Sendable {
     // MARK: Copy
 
     /// SQLite's online-backup API, reading the source `immutable` and writing a file this
-    /// process created. A plain file copy would race WhatsApp's own writes and could catch
-    /// a page mid-update; the backup API reads a consistent set of pages.
+    /// process created. Immutable means no lock is taken, so there is no guarantee against
+    /// WhatsApp checkpointing while the copy runs; the stamp is taken first, so a source that
+    /// changed meanwhile is simply copied again on the next call.
     private func copyDatabase(from source: URL, to destination: URL, database: AllowedDatabase)
         throws
     {
@@ -281,6 +282,11 @@ public struct SnapshotCache: Sendable {
             // The page header copied from WhatsApp says "WAL mode". The copy is read
             // `immutable`, so give it a plain rollback journal and no sidecar files.
             sqlite3_exec(destinationHandle, "PRAGMA journal_mode=DELETE", nil, nil, nil)
+            do { try Self.scrubKeyMaterial(destinationHandle) } catch let failure as SnapshotError {
+                throw failure
+            } catch {
+                throw fail("key material could not be removed from the copy: \(error)")
+            }
         }
 
         try fileManager.setAttributes(
@@ -289,6 +295,59 @@ public struct SnapshotCache: Sendable {
             _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
         } else {
             try fileManager.moveItem(at: temporary, to: destination)
+        }
+    }
+
+    // MARK: Scrubbing
+
+    private struct ScrubFailure: Error { let detail: String }
+
+    /// Empties, in the copy, everything `blockedReads` refuses to return, so the cache
+    /// does not hold keys that `db_query` was built to withhold. A table is emptied, a
+    /// column is set to NULL, and `secure_delete` zeroes the pages the old values sat in
+    /// instead of leaving them readable inside the file. If any step fails the whole copy
+    /// fails: a half-scrubbed copy is worse than none.
+    ///
+    /// Only the copy is touched; the source is opened read-only and never written.
+    private static func scrubKeyMaterial(_ handle: OpaquePointer) throws {
+        func exec(_ sql: String) throws {
+            var message: UnsafeMutablePointer<CChar>?
+            guard sqlite3_exec(handle, sql, nil, nil, &message) == SQLITE_OK else {
+                let detail = message.map { String(cString: $0) } ?? "unknown"
+                sqlite3_free(message)
+                throw ScrubFailure(detail: "\(sql): \(detail)")
+            }
+        }
+        func strings(_ sql: String) throws -> [String] {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw ScrubFailure(detail: String(cString: sqlite3_errmsg(handle)))
+            }
+            defer { sqlite3_finalize(statement) }
+            var values: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let text = sqlite3_column_text(statement, 1) { values.append(String(cString: text)) }
+            }
+            return values
+        }
+        func quoted(_ name: String) -> String { "\"" + name.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+
+        try exec("PRAGMA secure_delete = ON")
+        let tables = try strings("SELECT 0, name FROM sqlite_master WHERE type = 'table'")
+        for rule in blockedReads {
+            let matching = tables.filter {
+                rule.table == "*" || $0.caseInsensitiveCompare(rule.table) == .orderedSame
+            }
+            for table in matching {
+                guard let column = rule.column else {
+                    try exec("DELETE FROM \(quoted(table))")
+                    continue
+                }
+                let present = try strings("SELECT 0, name FROM pragma_table_info(\(quoted(table).replacingOccurrences(of: "\"", with: "'")))")
+                guard let actual = present.first(where: { $0.caseInsensitiveCompare(column) == .orderedSame })
+                else { continue }
+                try exec("UPDATE \(quoted(table)) SET \(quoted(actual)) = NULL")
+            }
         }
     }
 }

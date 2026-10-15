@@ -6,8 +6,9 @@ import MCP
 /// Never opens the chat database itself — every read goes through `WhatsAppStore`, which
 /// is what lets the tests drive every branch below with no database on disk.
 ///
-/// This server reads and nothing else. There is no sender, no shortcut and no Apple
-/// event anywhere beneath this type, so no tool routed here can reach outside this Mac.
+/// This server never changes WhatsApp. There is no sender, no shortcut and no Apple
+/// event anywhere beneath this type, so no tool routed here can reach outside this Mac;
+/// the only thing a tool writes is the server's own cache.
 public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?

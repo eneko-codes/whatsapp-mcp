@@ -17,12 +17,15 @@ import Foundation
 /// `+34600111222`; Claude is what cross-references the Contacts MCP server when a name
 /// matters more than that.
 ///
-/// A `…@lid` this server cannot name stays a LID, and there is no fourth source to try:
-/// the schema has no table mapping a LID to the phone number behind it. Every table was
-/// checked by name and the only column anywhere containing the string "lid" belongs to
-/// `ZWAZ1PAYMENTTRANSACTION`, unrelated to identity. WhatsApp's own Mac client presumably
-/// resolves this some other way — a server call, most likely — which is exactly the kind of
-/// thing this server does not do.
+/// A `…@lid` this server cannot name stays a LID, and there is no fourth source to try in
+/// the chat store: `ChatStorage.sqlite` has no table mapping a LID to the phone number
+/// behind it. Every table was checked by name and the only column there containing the
+/// string "lid" belongs to `ZWAZ1PAYMENTTRANSACTION`, unrelated to identity.
+///
+/// Other databases in the container do have pairing tables (`LID.sqlite`,
+/// `ExtChatDB`), and `lid_lookup` reads them. They are deliberately not wired in here:
+/// their coverage has not been measured, so a name resolved from them would be reported
+/// as what that table says rather than folded silently into every sender line.
 public enum JIDDisplay {
 
     /// Everything this database knows about one party, in the form the tools pass around.

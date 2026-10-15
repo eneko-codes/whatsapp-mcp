@@ -186,6 +186,45 @@ struct SnapshotCacheTests {
             atPath: fake.cache.appendingPathComponent("ChatStorage.sqlite").path))
     }
 
+    @Test("A copy holds none of the key material db_query refuses to return, not even as bytes")
+    func copiesAreScrubbed() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        let marker = "KEYMARK-0123456789-ABCDEF"
+        try fake.build(
+            .extendedChat,
+            [
+                "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key_id TEXT, key BLOB)",
+                "INSERT INTO feature_key_store VALUES (1, 'id', CAST('\(marker)' AS BLOB))",
+                "CREATE TABLE extended_media_item (row_id INTEGER PRIMARY KEY, media_key BLOB, url TEXT)",
+                "INSERT INTO extended_media_item VALUES (1, CAST('\(marker)' AS BLOB), 'kept')",
+                "CREATE TABLE channel_metadata (channel_metadata_id INTEGER PRIMARY KEY, channel_name TEXT)",
+                "INSERT INTO channel_metadata VALUES (1, 'kept too')",
+            ])
+        try fake.build(
+            .chatStorage,
+            [
+                "CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIAKEY BLOB, ZTITLE TEXT)",
+                "INSERT INTO ZWAMEDIAITEM VALUES (1, CAST('\(marker)' AS BLOB), 'kept')",
+            ])
+        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+        for database in [AllowedDatabase.extendedChat, .chatStorage] {
+            let (url, _) = try cache.snapshot(of: database)
+            let bytes = try Data(contentsOf: url)
+            #expect(bytes.range(of: Data(marker.utf8)) == nil, "\(database) copy still holds the key bytes")
+        }
+        // Everything around the removed columns survives.
+        let rows = try fake.explorer().select(
+            "SELECT url FROM extended_media_item UNION ALL SELECT channel_name FROM channel_metadata",
+            in: .extendedChat, limit: 10)
+        #expect(rows.rows.map { $0[0] } == ["kept", "kept too"])
+        let titles = try fake.explorer().select("SELECT ZTITLE FROM ZWAMEDIAITEM", in: .chatStorage, limit: 10)
+        #expect(titles.rows == [["kept"]])
+        // The source was not touched.
+        let source = try Data(contentsOf: fake.sourceURL(.chatStorage))
+        #expect(source.range(of: Data(marker.utf8)) != nil, "the scrub reached the source")
+    }
+
     @Test("A cache directory that already exists keeps its mode; one the server makes is private")
     func existingCacheDirectoryIsNotChmodded() throws {
         let fake = try FakeContainer()

@@ -74,6 +74,17 @@ struct WhatsAppToolsTests {
         #expect(Set(declared ?? []) == Set(ToolCatalog.all().map(\.name)))
     }
 
+    /// The installer keys on the manifest version alone, so a build whose constant and
+    /// manifest disagree is one nobody can tell apart from the last.
+    @Test("The server's version constant matches the manifest's")
+    func versionMatchesTheManifest() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("extension/manifest.json"))
+        let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(manifest?["version"] as? String == WhatsAppMCPServer.version)
+    }
+
     /// Claude Desktop's schema sanitiser drops a property whose `type` is a union and
     /// hands the model a bare `{}` instead, which stays invisible until a caller happens
     /// to use that field.
@@ -137,8 +148,9 @@ struct WhatsAppToolsTests {
         #expect(text.contains("ZWAMESSAGEDATAITEM"))
     }
 
-    /// The schema was searched exhaustively for a LID→phone mapping and none exists — see
-    /// the comment on `JIDDisplay`. That is a claim about data this server will never be
+    /// `ChatStorage` was searched exhaustively for a LID→phone mapping and none exists — see
+    /// the comment on `JIDDisplay`. Other databases do have pairing tables, which is what
+    /// `lid_lookup` is for, so the status line is scoped to the chat database. That is a claim about data this server will never be
     /// able to produce, not an implementation gap, so `whatsapp_status` says so up front
     /// rather than leaving a caller to discover it by asking `group_get` or `message_get`
     /// for a phone number a `…@lid` sender simply does not carry.
@@ -146,7 +158,8 @@ struct WhatsAppToolsTests {
     func statusStatesNoLIDToPhoneMapping() async {
         let (text, isError) = await call(ToolCatalog.statusName, store: stocked())
         #expect(!isError)
-        #expect(text.contains("no LID\u{2192}phone mapping"))
+        #expect(text.contains("no LID\u{2192}phone mapping in the chat database"))
+        #expect(text.contains("lid_lookup"))
     }
 
     /// Same shape of claim as the LID mapping above: `ZWACHATSESSION` and `ZWAMESSAGE` were
