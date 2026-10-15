@@ -58,7 +58,8 @@ public enum WhatsAppMCPServer {
         let tools = WhatsAppTools(
             store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
             explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
-            reader: reader ?? SnapshotDomainReader(cache: cache))
+            reader: reader ?? SnapshotDomainReader(cache: cache),
+            mediaFiles: MediaFiles(containerDirectory: configuration.containerDirectory))
         let server = Server(
             name: name,
             version: version,

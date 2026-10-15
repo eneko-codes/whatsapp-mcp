@@ -12,24 +12,26 @@ public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?
     private let reader: (any DomainReader)?
+    private let mediaFiles: MediaFiles?
     private let calendar: Calendar
     private let format: Format
 
     public init(
         store: any WhatsAppStore, explorer: (any DatabaseExplorer)? = nil,
-        reader: (any DomainReader)? = nil, calendar: Calendar = .current
+        reader: (any DomainReader)? = nil, mediaFiles: MediaFiles? = nil,
+        calendar: Calendar = .current
     ) {
         self.store = store
         self.explorer = explorer
         self.reader = reader
+        self.mediaFiles = mediaFiles
         self.calendar = calendar
         self.format = Format(calendar: calendar)
     }
 
     public func handle(_ parameters: CallTool.Parameters) async -> CallTool.Result {
         do {
-            let text = try await run(parameters)
-            return .init(content: [.text(text: text, annotations: nil, _meta: nil)], isError: false)
+            return .init(content: try await contents(parameters), isError: false)
         } catch let error as ToolError {
             return .init(
                 content: [.text(text: error.message, annotations: nil, _meta: nil)], isError: true)
@@ -41,6 +43,16 @@ public struct WhatsAppTools: Sendable {
                         annotations: nil, _meta: nil)
                 ], isError: true)
         }
+    }
+
+    /// Every tool answers with text except `media_view`, which also returns images.
+    private func contents(_ parameters: CallTool.Parameters) async throws -> [Tool.Content] {
+        if parameters.name == ToolCatalog.mediaViewName {
+            let availability = store.availability()
+            guard availability.isUsable else { throw ToolError.storeUnavailable(availability) }
+            return try await mediaView(Arguments(parameters.arguments, calendar: calendar))
+        }
+        return [.text(text: try await run(parameters), annotations: nil, _meta: nil)]
     }
 
     private func run(_ parameters: CallTool.Parameters) async throws -> String {
@@ -87,6 +99,9 @@ public struct WhatsAppTools: Sendable {
 
         case ToolCatalog.groupGetName:
             return try await group(arguments)
+
+        case ToolCatalog.mediaGetName:
+            return try await mediaGet(arguments)
 
         default:
             throw ToolError.badArgument(
@@ -152,6 +167,106 @@ public struct WhatsAppTools: Sendable {
         query.kinds = requestedKinds.isEmpty ? MediaKind.allCases : requestedKinds
 
         return format.media(try await store.media(matching: query), query: query)
+    }
+
+    // MARK: Attachment files
+
+    /// The message, its attachment, and the file's resolved URL when it is on this Mac.
+    private func attachment(_ arguments: Arguments) async throws -> (
+        message: Message, attachment: Attachment, url: URL?
+    ) {
+        let id = try arguments.requiredInt("message_id")
+        guard let message = try await store.message(id: id) else {
+            throw ToolError.messageNotFound(id: id)
+        }
+        guard case .attachment(let attachment) = message.body else {
+            throw ToolError.noAttachment(id: id)
+        }
+        guard let stored = attachment.localPath else { return (message, attachment, nil) }
+        guard let mediaFiles else {
+            throw ToolError.mediaProblem("Attachment files are not configured in this server.")
+        }
+        guard let url = mediaFiles.contained(stored) else {
+            // Gone between the store's check and this one: absent, not escaping.
+            guard FileManager.default.fileExists(atPath: stored) else {
+                return (message, attachment, nil)
+            }
+            throw ToolError.mediaProblem(
+                "The stored path for message \(id) is not inside WhatsApp's Message folder, "
+                    + "so no tool here will open it.")
+        }
+        return (message, attachment, url)
+    }
+
+    private func mediaGet(_ arguments: Arguments) async throws -> String {
+        let (message, attachment, url) = try await attachment(arguments)
+        guard let url else { return format.mediaMissing(message, attachment: attachment) }
+        do {
+            return format.mediaFacts(
+                message, attachment: attachment, url: url, facts: try MediaFiles.facts(of: url))
+        } catch {
+            throw ToolError.mediaProblem("The file could not be read: \(error.localizedDescription)")
+        }
+    }
+
+    private func mediaView(_ arguments: Arguments) async throws -> [Tool.Content] {
+        let (message, attachment, url) = try await attachment(arguments)
+        func text(_ value: String) -> Tool.Content { .text(text: value, annotations: nil, _meta: nil) }
+        guard let url else { return [text(format.mediaMissing(message, attachment: attachment))] }
+
+        let heading = format.mediaHeading(message, attachment: attachment)
+        do {
+            switch attachment.kind {
+            case .photo, .sticker, .gif:
+                let jpeg = try MediaFiles.jpegData(of: url)
+                return [
+                    .image(data: jpeg.base64EncodedString(), mimeType: "image/jpeg", annotations: nil, _meta: nil),
+                    text(heading),
+                ]
+
+            case .video:
+                let count = try arguments.int("frames", default: 4, in: 1...8)
+                let (frames, seconds) = try await MediaFiles.keyFrames(of: url, count: count)
+                var content: [Tool.Content] = frames.map {
+                    .image(data: $0.base64EncodedString(), mimeType: "image/jpeg", annotations: nil, _meta: nil)
+                }
+                content.append(
+                    text(
+                        heading + "\n\(frames.count) frames, evenly spaced over \(Int(seconds.rounded())) s. "
+                            + "For what is said, use audio_transcribe with this message id."))
+                return content
+
+            case .document:
+                let mime = MediaFiles.mimeType(of: url)
+                if mime == "application/pdf" {
+                    return [text(heading + "\n\n" + format.documentText(try MediaFiles.pdfText(of: url), pdf: true))]
+                }
+                if mime.hasPrefix("text/") {
+                    return [text(heading + "\n\n" + format.documentText(try MediaFiles.plainText(of: url), pdf: false))]
+                }
+                return [
+                    text(
+                        heading + "\n\nNo viewer for \(mime): this server reads images, PDFs, text "
+                            + "and video frames. media_get gives the path and hash.")
+                ]
+
+            case .voiceNote, .audioFile:
+                return [text(heading + "\n\nAudio is not played here. Use audio_transcribe with this message id.")]
+            }
+        } catch let failure as MediaFiles.ViewError {
+            switch failure {
+            case .unreadable(let detail):
+                throw ToolError.mediaProblem("This attachment could not be opened: \(detail).")
+            case .tooManyPixels(let pixels, let limit):
+                throw ToolError.mediaProblem(
+                    "This image is \(pixels) pixels, over the \(limit)-pixel limit for viewing.")
+            case .tooLarge(let size, let limit):
+                throw ToolError.mediaProblem(
+                    "This file is \(size) bytes, over the \(limit)-byte limit for viewing.")
+            case .locked:
+                throw ToolError.mediaProblem("This PDF is password-protected; its text cannot be read.")
+            }
+        }
     }
 
     private func domainTool(_ name: String, _ arguments: Arguments) throws -> String {

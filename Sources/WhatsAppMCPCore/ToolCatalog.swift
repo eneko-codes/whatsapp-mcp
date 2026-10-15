@@ -19,6 +19,8 @@ public enum ToolCatalog {
     public static let messageGetName = "message_get"
     public static let groupGetName = "group_get"
     public static let mediaName = "media_list"
+    public static let mediaGetName = "media_get"
+    public static let mediaViewName = "media_view"
     public static let callsName = "calls_list"
     public static let locationSharingName = "location_sharing_list"
     public static let labelsName = "labels_list"
@@ -30,7 +32,7 @@ public enum ToolCatalog {
     public static let dbQueryName = "db_query"
 
     public static func all() -> [Tool] {
-        [status, chats, chatGet, search, messageGet, groupGet, media, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
+        [status, chats, chatGet, search, messageGet, groupGet, media, mediaGet, mediaView, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
     }
 
     // MARK: Schema helpers
@@ -324,6 +326,56 @@ public enum ToolCatalog {
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,
             openWorldHint: false)
+    )
+
+    // MARK: Opening attachments
+
+    static let mediaGet = Tool(
+        name: mediaGetName,
+        title: "Describe an attachment file",
+        description: """
+            Facts about the file behind one attachment: its real path under WhatsApp's \
+            Message folder, MIME type, exact size, SHA-256, and the chat, sender and date \
+            of the message it belongs to. Opens the file only to hash it.
+
+            If the file is not on this Mac — WhatsApp evicts files and keeps the row — \
+            it says so rather than inventing a path. Use media_list to find a message id, \
+            and media_view to see what is in the file.
+            """,
+        inputSchema: object(
+            properties: [
+                "message_id": integer(
+                    "Message id of the attachment, from media_list or chat_get.",
+                    minimum: 1, maximum: Int.max)
+            ], required: ["message_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let mediaView = Tool(
+        name: mediaViewName,
+        title: "View an attachment",
+        description: """
+            Shows what is inside an attachment. A photo, sticker or GIF comes back as an \
+            image, reduced to at most 1568 pixels on its longest side. A PDF (or a text \
+            document) comes back as its text, capped in length; a scanned PDF has no text \
+            layer and says so. A video comes back as evenly spaced still frames. A voice \
+            note or audio file is not played: use audio_transcribe.
+
+            The file must be under WhatsApp's Message folder on this Mac. If it was \
+            evicted, the answer says so. Nothing is written anywhere.
+            """,
+        inputSchema: object(
+            properties: [
+                "message_id": integer(
+                    "Message id of the attachment, from media_list or chat_get.",
+                    minimum: 1, maximum: Int.max),
+                "frames": integer(
+                    "For a video: how many still frames to return.", minimum: 1, maximum: 8,
+                    default: 4),
+            ], required: ["message_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
     )
 
     // MARK: Beyond the chat store

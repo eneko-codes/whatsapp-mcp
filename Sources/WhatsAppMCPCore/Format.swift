@@ -134,6 +134,52 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    // MARK: Attachment files
+
+    private func sender(_ message: Message) -> String {
+        if message.isFromMe { return "you" }
+        return message.sender?.displayName ?? message.chatName
+    }
+
+    public func mediaHeading(_ message: Message, attachment: Attachment) -> String {
+        "message \(message.id) · \(MediaKind(attachment.kind).rawValue) · chat \(message.chatName) · "
+            + "from \(sender(message)) · \(DateParsing.roundTrip(message.date, calendar: calendar))"
+            + (message.text.map { "\ncaption: \($0)" } ?? "")
+    }
+
+    public func mediaMissing(_ message: Message, attachment: Attachment) -> String {
+        mediaHeading(message, attachment: attachment)
+            + "\n\nThe file is not on this Mac. WhatsApp keeps the message row after it evicts "
+            + "the file, so this does not mean the message is gone."
+            + (attachment.fileSize.map { "\nWhatsApp recorded a size of \($0) bytes." } ?? "")
+    }
+
+    public func mediaFacts(
+        _ message: Message, attachment: Attachment, url: URL, facts: MediaFiles.FileFacts
+    ) -> String {
+        var lines = [mediaHeading(message, attachment: attachment), ""]
+        lines.append("path: \(url.path)")
+        lines.append("type: \(facts.mimeType)")
+        lines.append("size: \(facts.byteCount) bytes")
+        lines.append("sha256: \(facts.sha256)")
+        if let recorded = attachment.fileSize, recorded != facts.byteCount {
+            lines.append("note: WhatsApp's row records \(recorded) bytes; the file on disk differs")
+        }
+        if let title = attachment.title { lines.append("title: \(title)") }
+        if let seconds = attachment.duration { lines.append("duration: \(seconds) s") }
+        return lines.joined(separator: "\n")
+    }
+
+    public func documentText(_ document: MediaFiles.PDFText, pdf: Bool) -> String {
+        if document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return pdf
+                ? "\(document.pageCount) page(s) and no text layer: this is a scan, and reading its pixels is not done here."
+                : "The document is empty."
+        }
+        return (pdf ? "\(document.pageCount) page(s)\n\n" : "")
+            + document.text + (document.truncated ? "\n\n[cut here: the text is longer than the limit]" : "")
+    }
+
     // MARK: Beyond the chat store
 
     private func when(_ date: Date?) -> String {

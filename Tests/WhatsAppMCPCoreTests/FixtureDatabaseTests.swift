@@ -568,6 +568,28 @@ struct FixtureDatabaseTests {
         #expect(attachment.localPath == nil)
     }
 
+    @Test("A stored path that leads out of Message/ is reported as no file")
+    func mediaPathOutsideMessageFolderIsNotReported() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        // The row for message 41 names Media/evicted.jpg, which does not exist. Plant a
+        // link there that leads to a real file outside Message/.
+        let outside = fixture.directory.appendingPathComponent("outside-secret.txt")
+        try Data("invented".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.mediaDirectory.appendingPathComponent("evicted.jpg"),
+            withDestinationURL: outside)
+
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+        let page = try await store.media(matching: MessageQuery(kinds: MediaKind.allCases))
+        let linked = try #require(page.rows.first { $0.id == 41 })
+        guard case .attachment(let attachment) = linked.body else {
+            Issue.record("message 41 is not an attachment")
+            return
+        }
+        #expect(attachment.localPath == nil)
+    }
+
     /// The one distinction `ZMESSAGETYPE` cannot make on its own, and the one a reader of a
     /// conversation cares about most.
     @Test("A voice note and an audio file share a type and are still told apart")

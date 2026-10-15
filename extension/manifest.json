@@ -61,6 +61,14 @@
       "description": "What this server can read about a group: when it was created and by whom, when its name last changed, and every member row with its address, resolved name and admin flag."
     },
     {
+      "name": "media_get",
+      "description": "Facts about the file behind one attachment: its real path, MIME type, exact size, SHA-256, and the chat, sender and date. Says plainly when the file is not on this Mac."
+    },
+    {
+      "name": "media_view",
+      "description": "Shows what is inside an attachment: a photo or sticker as an image, a PDF or text document as text, a video as still frames. Audio is transcribed with audio_transcribe."
+    },
+    {
       "name": "calls_list",
       "description": "Lists voice and video calls from WhatsApp's call history: when, how long, direction, missed or not, video or voice, group and participants. The outcome is the stored number, not a guessed meaning."
     },

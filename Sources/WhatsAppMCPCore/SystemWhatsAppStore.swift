@@ -482,7 +482,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     private func resolvedMediaPath(_ storedPath: String?) -> String? {
         guard let storedPath, !storedPath.isEmpty else { return nil }
         let absolute = mediaRoot.appendingPathComponent(storedPath).path
-        return FileManager.default.fileExists(atPath: absolute) ? absolute : nil
+        // A stored path with `..` in it, or a link that leads out of `Message/`, is not a
+        // file this server reports: every media tool opens what this returns.
+        return MediaFiles.contained(absolute, in: mediaRoot)?.path
     }
 
     // MARK: Groups
