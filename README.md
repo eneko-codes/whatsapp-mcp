@@ -100,8 +100,8 @@ source file changes), saved transcripts, and a scratch folder deleted after each
 It is **real message data in plaintext**, readable only by your user, and it stays until you
 delete it — remove the folder to remove it all. `--cache-directory` moves it. A copy is
 emptied, as it is made, of the key material `db_query` refuses to return (feature keys, media
-keys, the key-value blobs and the protocol queues); the rest of each database is copied as it
-is. This server writes nowhere else: SQLite and the Apple frameworks it calls may use the
+keys, the key-value blobs and the protocol queues) and rebuilt so that nothing WhatsApp had
+already deleted survives in it; the rest of each database is copied as it is. This server writes nowhere else: SQLite and the Apple frameworks it calls may use the
 system's temporary files for their own transient work.
 
 ## Prerequisites for transcription

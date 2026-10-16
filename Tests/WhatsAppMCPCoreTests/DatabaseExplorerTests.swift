@@ -49,7 +49,9 @@ struct FakeContainer {
         defer { sqlite3_close(handle) }
         for statement in statements {
             guard sqlite3_exec(handle, statement, nil, nil, nil) == SQLITE_OK else {
-                throw NSError(domain: "fixture", code: 2)
+                throw NSError(
+                    domain: "fixture", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "\(statement): \(String(cString: sqlite3_errmsg(handle)))"])
             }
         }
     }
@@ -223,6 +225,91 @@ struct SnapshotCacheTests {
         // The source was not touched.
         let source = try Data(contentsOf: fake.sourceURL(.chatStorage))
         #expect(source.range(of: Data(marker.utf8)) != nil, "the scrub reached the source")
+    }
+
+    @Test("Rows WhatsApp deleted long ago do not survive in the copy's free pages")
+    func deletedBytesDoNotSurvive() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        let marker = "STALEKEY-9876543210-ZYXWVU"
+        // Larger than a page, so it spills to overflow pages that go to the freelist.
+        let blob = String(repeating: "x", count: 6000) + marker + String(repeating: "y", count: 6000)
+        try fake.build(
+            .extendedChat,
+            [
+                "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key BLOB)",
+                "INSERT INTO feature_key_store VALUES (1, CAST('\(blob)' AS BLOB))",
+                "DELETE FROM feature_key_store",
+            ])
+        let source = try Data(contentsOf: fake.sourceURL(.extendedChat))
+        try #require(
+            source.range(of: Data(marker.utf8)) != nil,
+            "precondition: the deleted bytes must still be in the source for this test to mean anything")
+
+        let (url, _) = try SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+            .snapshot(of: .extendedChat)
+        #expect(try Data(contentsOf: url).range(of: Data(marker.utf8)) == nil)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: fake.cache.path).sorted()
+        #expect(leftovers == ["ExtChatDB.sqlite", "ExtChatDB.stamp.json"], "\(leftovers)")
+    }
+
+    @Test("A full-text table with a tokenizer this process lacks does not stop the copy")
+    func virtualTablesAreSkipped() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.build(
+            .chatSearch,
+            [
+                "CREATE VIRTUAL TABLE docs USING fts4(content, tokenize=simple)",
+                "INSERT INTO docs (content) VALUES ('invented words')",
+            ])
+        // WhatsApp's own tokenizers are not registered in this process. Rewriting the schema
+        // needs `writable_schema`, which the library refuses to honour in-process (its
+        // defensive mode cannot be switched off from Swift), so the system's sqlite3 does it.
+        let editor = Process()
+        editor.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        editor.arguments = [
+            fake.sourceURL(.chatSearch).path,
+            "PRAGMA writable_schema = ON; UPDATE sqlite_master SET sql = replace(sql, 'tokenize=simple', 'tokenize=wa_missing') WHERE name = 'docs'; PRAGMA writable_schema = OFF;",
+        ]
+        try editor.run()
+        editor.waitUntilExit()
+        #expect(editor.terminationStatus == 0)
+        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+        let (url, _) = try cache.snapshot(of: .chatSearch)
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        // Structure stays readable even though the table itself cannot be opened here.
+        let (text, isError) = try {
+            let schema = try fake.explorer().schema(of: .chatSearch, table: "docs")
+            return (schema.statements.joined(), false)
+        }()
+        #expect(!isError)
+        #expect(text.contains("wa_missing"))
+    }
+
+    @Test("A copy made before the current scrubbing rules is made again, source unchanged")
+    func olderScrubVersionIsStale() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.make(.contacts)
+        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+        let first = try cache.snapshot(of: .contacts)
+
+        let record = fake.cache.appendingPathComponent("ContactsV2.stamp.json")
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String: Any])
+        object["scrubVersion"] = 0
+        try JSONSerialization.data(withJSONObject: object).write(to: record)
+
+        #expect(cache.existingSnapshots().first?.stale == true)
+        let second = try cache.snapshot(of: .contacts)
+        #expect(second.info.copiedAt > first.info.copiedAt)
+
+        // A record from before there was a version at all is treated the same way.
+        object.removeValue(forKey: "scrubVersion")
+        try JSONSerialization.data(withJSONObject: object).write(to: record)
+        let third = try cache.snapshot(of: .contacts)
+        #expect(third.info.copiedAt > second.info.copiedAt)
     }
 
     @Test("A cache directory that already exists keeps its mode; one the server makes is private")

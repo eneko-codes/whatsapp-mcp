@@ -137,14 +137,16 @@ public struct SnapshotCache: Sendable {
         let current = Self.stamp(of: source)
 
         if FileManager.default.fileExists(atPath: copy.path),
-            let recorded = readRecord(for: database), recorded.stamp == current
+            let recorded = readRecord(for: database), recorded.stamp == current,
+            recorded.scrubVersion == Self.scrubVersion
         {
             return (copy, info(recorded, database: database, stale: false))
         }
 
         try copyDatabase(from: source, to: copy, database: database)
         let record = Record(
-            stamp: current, copiedAt: Date(), walPending: Self.hasWAL(beside: source))
+            stamp: current, copiedAt: Date(), walPending: Self.hasWAL(beside: source),
+            scrubVersion: Self.scrubVersion)
         try writeRecord(record, for: database)
         return (copy, info(record, database: database, stale: false))
     }
@@ -157,7 +159,9 @@ public struct SnapshotCache: Sendable {
             guard let record = readRecord(for: database) else { return nil }
             let source = containerDirectory.appendingPathComponent(database.relativePath)
             return info(
-                record, database: database, stale: Self.stamp(of: source) != record.stamp)
+                record, database: database,
+                stale: Self.stamp(of: source) != record.stamp
+                    || record.scrubVersion != Self.scrubVersion)
         }
     }
 
@@ -175,7 +179,13 @@ public struct SnapshotCache: Sendable {
         var stamp: Stamp
         var copiedAt: Date
         var walPending: Bool
+        /// Which scrubbing rules produced the copy. A copy made by an older version, or
+        /// before there was any scrubbing, is stale however unchanged its source is.
+        var scrubVersion: Int
     }
+
+    /// Bump whenever `blockedReads` or the way a copy is cleaned changes.
+    static let scrubVersion = 2
 
     static func stamp(of source: URL) -> Stamp {
         let attributes = try? FileManager.default.attributesOfItem(atPath: source.path)
@@ -232,11 +242,16 @@ public struct SnapshotCache: Sendable {
 
         let temporary = cacheDirectory.appendingPathComponent(
             "\(database.cacheFileName).tmp-\(UUID().uuidString)")
+        // The scrubbed copy is rebuilt into this second file, so the first — which still
+        // holds the keys in its free pages — never becomes the cache.
+        let rebuilt = URL(fileURLWithPath: temporary.path + ".rebuilt")
         // The backup copies WhatsApp's "WAL mode" header into the new file, so SQLite creates
         // `-shm` and `-wal` beside it while it is open. Remove them with the temporary.
         defer {
-            for suffix in ["", "-shm", "-wal", "-journal"] {
-                try? fileManager.removeItem(atPath: temporary.path + suffix)
+            for base in [temporary.path, rebuilt.path] {
+                for suffix in ["", "-shm", "-wal", "-journal"] {
+                    try? fileManager.removeItem(atPath: base + suffix)
+                }
             }
         }
 
@@ -287,14 +302,27 @@ public struct SnapshotCache: Sendable {
             } catch {
                 throw fail("key material could not be removed from the copy: \(error)")
             }
+            // Scrubbing zeroes what it overwrites, but the backup also copied the free pages
+            // and slack where rows WhatsApp deleted long ago still sit — it does not use
+            // secure_delete. `VACUUM INTO` writes only live content to a new file, and unlike a
+            // plain VACUUM it needs no temporary copy of the database in the system's temp
+            // directory.
+            var rebuildError: UnsafeMutablePointer<CChar>?
+            let escaped = rebuilt.path.replacingOccurrences(of: "'", with: "''")
+            guard sqlite3_exec(destinationHandle, "VACUUM INTO '\(escaped)'", nil, nil, &rebuildError) == SQLITE_OK
+            else {
+                let detail = rebuildError.map { String(cString: $0) } ?? "unknown"
+                sqlite3_free(rebuildError)
+                throw fail("the cleaned copy could not be rebuilt: \(detail)")
+            }
         }
 
         try fileManager.setAttributes(
-            [.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+            [.posixPermissions: 0o600], ofItemAtPath: rebuilt.path)
         if fileManager.fileExists(atPath: destination.path) {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+            _ = try fileManager.replaceItemAt(destination, withItemAt: rebuilt)
         } else {
-            try fileManager.moveItem(at: temporary, to: destination)
+            try fileManager.moveItem(at: rebuilt, to: destination)
         }
     }
 
@@ -325,15 +353,33 @@ public struct SnapshotCache: Sendable {
             }
             defer { sqlite3_finalize(statement) }
             var values: [String] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
+            var code = sqlite3_step(statement)
+            while code == SQLITE_ROW {
                 if let text = sqlite3_column_text(statement, 1) { values.append(String(cString: text)) }
+                code = sqlite3_step(statement)
+            }
+            // An error part-way is not "no rows": reading it as empty would skip a table that
+            // might hold a blocked column, which is failing open.
+            guard code == SQLITE_DONE else {
+                throw ScrubFailure(detail: String(cString: sqlite3_errmsg(handle)))
             }
             return values
         }
         func quoted(_ name: String) -> String { "\"" + name.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
 
         try exec("PRAGMA secure_delete = ON")
-        let tables = try strings("SELECT 0, name FROM sqlite_master WHERE type = 'table'")
+        // ANALYZE keeps sampled values of indexed columns; a blocked column that is indexed
+        // would leave samples of itself in here.
+        for statistics in ["sqlite_stat1", "sqlite_stat3", "sqlite_stat4"] {
+            if try strings("SELECT 0, name FROM sqlite_master WHERE name = '\(statistics)'").isEmpty == false {
+                try exec("DROP TABLE \(statistics)")
+            }
+        }
+        // Virtual tables are left out: WhatsApp's full-text indexes use tokenizers this
+        // process does not have, so even asking such a table for its columns fails — and
+        // none of the blocked data is in one. Their shadow tables are ordinary tables.
+        let tables = try strings(
+            "SELECT 0, name FROM sqlite_master WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%'")
         for rule in blockedReads {
             let matching = tables.filter {
                 rule.table == "*" || $0.caseInsensitiveCompare(rule.table) == .orderedSame
