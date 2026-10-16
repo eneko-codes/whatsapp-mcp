@@ -478,6 +478,7 @@ public struct SnapshotDomainReader: DomainReader {
     /// writer; neither is a value.
     private static func nonEmpty(_ text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }
-        return text
+        // Names, usernames and "about" lines are written by other people.
+        return text.displaySafe
     }
 }
