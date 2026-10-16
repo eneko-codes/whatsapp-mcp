@@ -25,7 +25,8 @@ And a read-only escape hatch over any allow-listed database: `db_tables`, `db_sc
 
 A message reads as what it is — text with its mentions resolved, a photo, a voice note with
 its length, a sticker, a document, a shared location with its coordinates, a shared contact
-with its vCard, a link with its preview, a group event, or a message deleted for everyone.
+with its vCard, a link with its preview, a group event, or a message deleted for everyone. A
+reply shows the message it quotes, and a message shows who reacted to it and with which emoji.
 Where WhatsApp keeps nothing, these tools say so instead of approximating.
 
 Not affiliated with or endorsed by WhatsApp or Meta.
@@ -49,7 +50,7 @@ and macOS ties that grant to the exact program: every rebuilt or updated copy ne
 |---|---|---|
 | `whatsapp_status` | read | Reports whether WhatsApp's local database can be read, how much is in it, what WhatsApp does not store locally at all, and what to do about anything missing. Reads no messages. |
 | `chats_list` | read | Lists conversations with their id, kind, unread count, how many messages are stored, and when the last one arrived. |
-| `chat_get` | read | A page of messages from one chat, newest first by default, each line saying who sent it and what the message is. |
+| `chat_get` | read | A page of messages from one chat, newest first by default, each line saying who sent it and what the message is. `↩N` marks a reply to message N, `[❤️ 😮]` the reactions on a message, `★` a starred one; `message_get` opens them up. |
 | `whatsapp_search` | read | Finds messages whose text contains a phrase, across every chat or within one. Ignores case and accents, so "angel" finds "Ángel". With `starred_only` the phrase can be left out, which lists every starred message in every chat. |
 | `message_get` | read | Everything the database holds about one message: mentions, both timestamps, an attachment's path/size/length/author, a shared contact's full vCard, a link preview, a group event's actor and subject, the message it replies to (with the quoted words), who reacted with which emoji and when, and the raw delivery and error codes. |
 | `media_list` | read | What was shared rather than said — photos, videos, GIFs, stickers, voice notes, audio, documents, locations, contact cards — with the message id each belongs to and the file's path on this Mac when it's here. |
@@ -92,11 +93,12 @@ macOS asks, grant it.
 | `sqlite3_backup_*` | The cache copies, read from the immutable source into a file this server owns | [Online backup API](https://www.sqlite.org/backup.html) |
 | `sqlite3_set_authorizer`, progress handler, `SQLITE_LIMIT_LENGTH` | Keeping `db_query` away from key material and bounding its cost | [Authorizer](https://www.sqlite.org/c3ref/set_authorizer.html) |
 | `Speech` — `SpeechAnalyzer`, `SpeechTranscriber` (macOS 26+) | On-device transcription; no server path, no model download | [Speech](https://developer.apple.com/documentation/speech) |
+| Protocol-buffers wire format, read by hand (`ProtobufWire`; no library) | A message's reactions (`ZWAMESSAGEINFO.ZRECEIPTINFO`) and the quote inside a reply (`ZWAMEDIAITEM.ZMETADATA`). WhatsApp publishes no schema, so an unrecognised shape yields nothing rather than a guess | [Encoding](https://protobuf.dev/programming-guides/encoding/) |
 | `AVFoundation`, `ImageIO`, `PDFKit` | Video frames, image reduction, PDF text | — |
 | `CryptoKit`, `UniformTypeIdentifiers` | SHA-256 and MIME types | — |
 | `ffmpeg` (subprocess, one local file, format pinned by its first bytes) | A video's sound track and containers macOS cannot open; not Ogg Opus voice notes, MP3 or M4A, which `AVAudioFile` opens itself (checked on macOS 27 only) | [ffmpeg](https://ffmpeg.org/) |
 
-Not used: FTS or `MATCH`, the blob API, busy handlers, and any network access.
+Not used: FTS or `MATCH`, SQLite's incremental blob API, busy handlers, and any network access.
 
 ## Databases `db_*` can read
 
@@ -117,6 +119,15 @@ keys, the key-value blobs and the protocol queues) and rebuilt so that nothing W
 already deleted survives in it; the rest of each database is copied as it is. This server
 writes nowhere else: SQLite and the Apple frameworks it calls may use the system's temporary
 files for their own transient work.
+
+## Logs
+
+The server writes one line per event to stderr, which Claude Desktop captures in
+`~/Library/Logs/Claude/mcp-server-<name>.log`: start and stop, each tool call with its outcome
+and duration, and the kind of any error. A line never carries an argument, a result, a message,
+a name, a path or an identifier — nothing in the logging API accepts free text, so none can be
+added by accident. Look there first when a tool misbehaves; `whatsapp_status` covers whether
+the database can be read.
 
 ## Prerequisites for transcription
 
