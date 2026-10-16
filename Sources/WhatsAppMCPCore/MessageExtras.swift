@@ -5,8 +5,9 @@ public struct Reaction: Sendable, Equatable {
     public let emoji: String
     /// Who reacted. Nil when the entry WhatsApp stored names nobody: every reaction seen
     /// from another person carries their address, and the entries without one sit on
-    /// messages from other people. They are probably the owner's own reactions, but that is
-    /// not established, so it is reported as "not recorded" and never as "you".
+    /// messages from other people. The owner confirmed one of them as their own reaction
+    /// (one case), which is not enough to state it for all, so it is reported as "not
+    /// recorded" and never as "you".
     public let reactor: Identity?
     public let date: Date?
 

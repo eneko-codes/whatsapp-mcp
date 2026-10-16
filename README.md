@@ -198,8 +198,9 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
   identified — WhatsApp clears it in place with no second copy and no link back.
 - Who starred a message, and when. A star is a yes/no flag on the message; nothing else is stored.
 - Reactions come with the reactor's address when WhatsApp stored one. Some entries (seen on
-  messages from other people) name nobody; they are reported as "reactor not recorded", not
-  assumed to be you.
+  messages from other people) name nobody; they are reported as "reactor not recorded". The one
+  such entry that was checked was the owner's own reaction, but one case is not a rule, so it is
+  never reported as you.
 - Delivery/read status is reported as a raw number, never as a word. Ten distinct codes exist
   in the wild and none has been confirmed against WhatsApp's own interface, so no tool here
   will claim a message was "read" on the strength of a guess.
