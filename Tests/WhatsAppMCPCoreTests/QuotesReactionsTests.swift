@@ -212,7 +212,7 @@ private func makeQuoteFixture(moment: Date) throws -> QuoteFixture {
         CREATE TABLE ZWAMESSAGEINFO (Z_PK INTEGER PRIMARY KEY, ZMESSAGE INTEGER, ZRECEIPTINFO BLOB);
 
         INSERT INTO ZWACHATSESSION VALUES
-            (1, '777@lid', 'Quote Friend', 0, 0, 0, 0, \(now), 'x', 1),
+            (1, '34600000001@s.whatsapp.net', 'Quote Friend', 0, 0, 0, 0, \(now), 'x', 1),
             (2, 'g@g.us', 'Reaction Group', 1, 0, 0, 0, \(now), 'x', 5);
         INSERT INTO ZWAGROUPMEMBER VALUES (1, 2, '', '888@lid', 0, 1);
         INSERT INTO ZWAPROFILEPUSHNAME VALUES (1, '888@lid', 'Grace Invented');
