@@ -116,7 +116,6 @@ public enum WhatsAppMCPServer {
         Diagnostics.started(version: version)
         try await server.start(transport: StdioTransport())
         await server.waitUntilCompleted()
-        Diagnostics.stopped()
         // The client closed stdin. Work still in flight dies with the process, and its
         // temporary files and ffmpeg would outlive it.
         ProcessCleanup.shared.run()

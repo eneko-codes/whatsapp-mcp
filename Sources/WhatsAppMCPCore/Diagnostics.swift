@@ -14,23 +14,15 @@ public enum Diagnostics {
         emit("info", "started version=\(version)")
     }
 
-    static func stopped() {
-        emit("info", "stopped")
-    }
-
     /// For the failure that ends the process. Exit status alone cannot say why.
     public static func fatal(_ error: Error) {
         emit("fatal", "exiting error=\(kind(of: error))")
     }
 
-    static func toolCompleted(_ name: String, since start: ContinuousClock.Instant) {
-        emit("info", "tool=\(toolName(name)) outcome=ok ms=\(milliseconds(since: start))")
-    }
-
     static func toolFailed(_ name: String, error: Error, since start: ContinuousClock.Instant) {
         emit(
             "error",
-            "tool=\(toolName(name)) outcome=failed error=\(kind(of: error)) ms=\(milliseconds(since: start))"
+            "tool=\(toolName(name)) failed error=\(kind(of: error)) ms=\(milliseconds(since: start))"
         )
     }
 
@@ -58,8 +50,13 @@ public enum Diagnostics {
         return "\(bridged.domain)#\(bridged.code)"
     }
 
-    static func line(_ level: String, _ event: String, at date: Date = Date()) -> String {
-        "\(date.formatted(.iso8601)) \(level) \(ProcessInfo.processInfo.processName) \(event)\n"
+    /// The process id is on every line because the host appends every instance of this
+    /// server (one per client session) to the same file, and a line must say which one.
+    static func line(
+        _ level: String, _ event: String, at date: Date = Date(),
+        processID: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) -> String {
+        "\(date.formatted(.iso8601)) \(level) \(ProcessInfo.processInfo.processName)[\(processID)] \(event)\n"
     }
 
     private static func milliseconds(since start: ContinuousClock.Instant) -> Int {
@@ -68,7 +65,10 @@ public enum Diagnostics {
     }
 
     // One write call per line, so concurrent tool calls cannot interleave halves of lines.
+    // `try?` because the throwing overload fails with an error; the plain `write(_:)`
+    // raises an Objective-C exception that Swift cannot catch, and a diagnostic must
+    // never be able to take the server down.
     private static func emit(_ level: String, _ event: String) {
-        FileHandle.standardError.write(Data(line(level, event).utf8))
+        try? FileHandle.standardError.write(contentsOf: Data(line(level, event).utf8))
     }
 }

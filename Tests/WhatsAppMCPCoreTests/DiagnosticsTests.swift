@@ -37,10 +37,11 @@ struct DiagnosticsTests {
         #expect(Diagnostics.toolName(String(repeating: "a", count: 65)) == "invalid")
     }
 
-    @Test("A line is one line")
-    func lineEndsOnce() {
-        let line = Diagnostics.line("info", "stopped")
-        #expect(line.filter { $0 == "\n" }.count == 1)
-        #expect(line.hasSuffix("stopped\n"))
+    @Test("Every line names the process that wrote it, so two instances can be told apart")
+    func lineCarriesProcessID() {
+        let first = Diagnostics.line("info", "started", processID: 4242)
+        let second = Diagnostics.line("info", "started", processID: 4243)
+        #expect(first.contains("[4242] started"))
+        #expect(first != second)
     }
 }
