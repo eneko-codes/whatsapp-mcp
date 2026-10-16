@@ -69,8 +69,9 @@ public struct Format: Sendable {
         case .accessDenied:
             lines.append("  permission: DENIED by macOS — this server's program needs Full Disk Access:")
             lines.append("    System Settings → Privacy & Security → Full Disk Access, turn on the")
-            lines.append("    program on the `binary:` line above (or add it with +), then quit and")
-            lines.append("    reopen Claude. A rebuilt or updated copy is a new program: grant it again.")
+            lines.append("    program on the `binary:` line above (or add it with +; if Claude Code or a")
+            lines.append("    terminal starts the server, that program instead), then quit and reopen the")
+            lines.append("    app that starts the server. A rebuilt or updated copy is a new program: grant it again.")
         case .ready:
             lines.append("  permission: macOS allowed this server to read it")
         case .databaseMissing, .databaseUnreadable, .schemaUnexpected:

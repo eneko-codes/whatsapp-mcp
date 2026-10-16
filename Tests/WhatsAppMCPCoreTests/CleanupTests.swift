@@ -18,9 +18,9 @@ struct CleanupTests {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
     }
 
-    @Test("The raw backup is owner-only from its first byte, while it still holds the keys",
+    @Test("The raw backup is owner-only and registered for cleanup from its first byte, while it holds the keys",
           .timeLimit(.minutes(2)))
-    func temporariesAreOwnerOnlyWhileTheCopyRuns() async throws {
+    func temporariesAreOwnerOnlyAndRegisteredWhileTheCopyRuns() async throws {
         let directory = try temporary()
         defer { try? FileManager.default.removeItem(at: directory) }
         let container = directory.appendingPathComponent("container")
@@ -41,28 +41,35 @@ struct CleanupTests {
         sqlite3_close(handle)
 
         let cache = directory.appendingPathComponent("cache")
-        let observed = ObservedModes()
+        let observed = ObservedTemporaries()
         let watcher = Task.detached {
             while !Task.isCancelled {
                 for name in (try? FileManager.default.contentsOfDirectory(atPath: cache.path)) ?? []
                 where name.contains(".tmp-") {
                     let url = cache.appendingPathComponent(name)
                     if let found = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int {
-                        observed.record(found)
+                        // Registered at the moment it was seen, which is the property: a signal
+                        // arriving now would delete it.
+                        // A journal or WAL file is covered by its database's registration: the
+                        // cleanup deletes the registered path and each of these suffixes.
+                        var base = url.path
+                        for suffix in ["-journal", "-wal", "-shm"] where base.hasSuffix(suffix) {
+                            base = String(base.dropLast(suffix.count))
+                        }
+                        observed.record(mode: found, registered: ProcessCleanup.shared.registeredPaths.contains(base))
                     }
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000)
             }
         }
-        // A permissive umask is what would have made the old code's files 0644/0666.
-        let previous = umask(0)
-        defer { umask(previous) }
+        // The default umask (022) is what would have made the old code's files 0644.
         _ = try SnapshotCache(containerDirectory: container, cacheDirectory: cache).snapshot(of: .extendedChat)
         watcher.cancel()
 
-        let modes = observed.values
-        #expect(!modes.isEmpty, "the copy was too quick to observe")
-        #expect(modes.allSatisfy { $0 == 0o600 }, "temporary modes seen: \(Set(modes).map { String($0, radix: 8) })")
+        #expect(!observed.modes.isEmpty, "the copy was too quick to observe")
+        #expect(observed.modes.allSatisfy { $0 == 0o600 }, "temporary modes seen: \(Set(observed.modes).map { String($0, radix: 8) })")
+        #expect(observed.unregistered == 0, "a temporary existed while not registered for cleanup")
+        #expect(ProcessCleanup.shared.registeredPaths.filter { $0.contains(".tmp-") }.isEmpty, "left registered after the copy")
     }
 
     @Test("Temporaries a dead process left are swept, a live process's are not")
@@ -152,17 +159,70 @@ struct CleanupTests {
         registry.run()  // twice is harmless
     }
 
-    @Test("A SIGTERM mid-conversion kills ffmpeg, removes the scratch directory and exits 143",
-          .enabled(if: FileManager.default.isExecutableFile(atPath: CleanupTests.serverBinary.path)),
-          .timeLimit(.minutes(2)))
-    func sigtermCleansUp() async throws {
-        let directory = try temporary()
-        defer { try? FileManager.default.removeItem(at: directory) }
+}
+
+private final class ObservedTemporaries: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [Int] = []
+    private var missed = 0
+    func record(mode: Int, registered: Bool) {
+        lock.withLock {
+            seen.append(mode)
+            if !registered { missed += 1 }
+        }
+    }
+    var modes: [Int] { lock.withLock { seen } }
+    var unregistered: Int { lock.withLock { missed } }
+}
+
+
+/// The built server, started for real, stopped for real.
+///
+/// Off unless `WHATSAPP_MCP_E2E` is set, because it needs the debug binary to be built
+/// (`swift build`, which `swift test` alone does not do) and the en-US speech model installed:
+/// the conversion it interrupts is reached only after the real engine accepts the language.
+/// `WHATSAPP_MCP_E2E=1 swift build && WHATSAPP_MCP_E2E=1 swift test --filter ServerLifecycle`.
+@Suite("ServerLifecycle", .serialized,
+       .enabled(if: ProcessInfo.processInfo.environment["WHATSAPP_MCP_E2E"] != nil))
+struct ServerLifecycleTests {
+
+    static let serverBinary: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(".build/debug/whatsapp-mcp")
+    }()
+
+    private struct Running {
+        let directory: URL
+        let server: Process
+        let input: Pipe
+        let ffmpegPID: Int32
+        let scratch: URL
+    }
+
+    private func waitFor(seconds: Double = 15, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    /// Starts the server and gets it into the middle of a conversion: ffmpeg running, scratch
+    /// directory made. Everything is polled, never waited on, so a stuck child cannot block a
+    /// cooperative thread and defeat the time limit.
+    private func startMidConversion() async throws -> Running {
+        let binary = Self.serverBinary
+        try #require(FileManager.default.isExecutableFile(atPath: binary.path),
+                     "build the debug binary first: swift build")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whatsapp-lifecycle-\(UUID().uuidString)")
         let container = directory.appendingPathComponent("container")
         let media = container.appendingPathComponent("Message/Media")
         try FileManager.default.createDirectory(at: media, withIntermediateDirectories: true)
         // Looks like Ogg to the sniffer, is not decodable by macOS, so the converter is used.
-        try Data("OggS".utf8 + Data("not real".utf8)).write(to: media.appendingPathComponent("note.opus"))
+        try (Data("OggS".utf8) + Data("not real".utf8)).write(to: media.appendingPathComponent("note.opus"))
 
         let pidFile = directory.appendingPathComponent("ffmpeg.pid")
         let ffmpeg = directory.appendingPathComponent("ffmpeg-hang")
@@ -171,14 +231,14 @@ struct CleanupTests {
 
         let cache = directory.appendingPathComponent("cache")
         let server = Process()
-        server.executableURL = Self.serverBinary
+        server.executableURL = binary
         server.arguments = [
             "--database", container.appendingPathComponent("ChatStorage.sqlite").path,
             "--cache-directory", cache.path, "--ffmpeg", ffmpeg.path,
         ]
-        let input = Pipe(), output = Pipe()
+        let input = Pipe()
         server.standardInput = input
-        server.standardOutput = output
+        server.standardOutput = Pipe()
         server.standardError = FileHandle.nullDevice
         try server.run()
         func send(_ object: [String: Any]) throws {
@@ -191,35 +251,51 @@ struct CleanupTests {
             "name": "audio_transcribe",
             "arguments": ["path": media.appendingPathComponent("note.opus").path, "language": "en-US"]]])
 
-        func waitFor(_ condition: () -> Bool) async -> Bool {
-            for _ in 0..<150 { if condition() { return true }; try? await Task.sleep(nanoseconds: 100_000_000) }
-            return condition()
-        }
         let started = await waitFor { FileManager.default.fileExists(atPath: pidFile.path) }
-        try #require(started, "ffmpeg never started — is the en-US speech model installed?")
-        let pid = Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines))!
+        guard started else {
+            server.terminate()
+            Issue.record("ffmpeg never started — is the en-US speech model installed?")
+            throw CancellationError()
+        }
+        let text = try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let pid = try #require(Int32(text))
         let scratch = cache.appendingPathComponent("tmp")
         #expect((try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.isEmpty == false,
                 "the scratch directory should exist mid-conversion")
-
-        kill(server.processIdentifier, SIGTERM)
-        server.waitUntilExit()
-
-        #expect(server.terminationStatus == 128 + SIGTERM)
-        #expect(await waitFor { kill(pid, 0) != 0 }, "ffmpeg survived the server")
-        #expect((try? FileManager.default.contentsOfDirectory(atPath: scratch.path))?.isEmpty ?? true)
+        return Running(directory: directory, server: server, input: input, ffmpegPID: pid, scratch: scratch)
     }
 
-    static let serverBinary: URL = {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(".build/debug/whatsapp-mcp")
-    }()
-}
+    private func assertCleanedUp(_ run: Running, expectedStatus: Int32) async {
+        let exited = await waitFor { !run.server.isRunning }
+        #expect(exited, "the server did not exit")
+        if exited { #expect(run.server.terminationStatus == expectedStatus) }
+        #expect(await waitFor { kill(run.ffmpegPID, 0) != 0 }, "ffmpeg survived the server")
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: run.scratch.path))?.isEmpty ?? true,
+                "the scratch directory was left behind")
+    }
 
-private final class ObservedModes: @unchecked Sendable {
-    private let lock = NSLock()
-    private var seen: [Int] = []
-    func record(_ mode: Int) { lock.withLock { seen.append(mode) } }
-    var values: [Int] { lock.withLock { seen } }
+    @Test("A signal mid-conversion kills ffmpeg, removes the scratch directory and exits 128+n",
+          .timeLimit(.minutes(2)), arguments: [SIGTERM, SIGINT, SIGHUP])
+    func signalCleansUp(signalNumber: Int32) async throws {
+        let run = try await startMidConversion()
+        defer { try? FileManager.default.removeItem(at: run.directory); if run.server.isRunning { run.server.terminate() } }
+        kill(run.server.processIdentifier, signalNumber)
+        await assertCleanedUp(run, expectedStatus: 128 + signalNumber)
+    }
+
+    @Test("A client that closes stdin mid-conversion leaves nothing behind either", .timeLimit(.minutes(2)))
+    func stdinCloseCleansUp() async throws {
+        let run = try await startMidConversion()
+        defer { try? FileManager.default.removeItem(at: run.directory); if run.server.isRunning { run.server.terminate() } }
+        try run.input.fileHandleForWriting.close()
+        await assertCleanedUp(run, expectedStatus: 0)
+    }
+
+    @Test("A client that disappears (SIGPIPE) leaves nothing behind", .timeLimit(.minutes(2)))
+    func sigpipeCleansUp() async throws {
+        let run = try await startMidConversion()
+        defer { try? FileManager.default.removeItem(at: run.directory); if run.server.isRunning { run.server.terminate() } }
+        kill(run.server.processIdentifier, SIGPIPE)
+        await assertCleanedUp(run, expectedStatus: 128 + SIGPIPE)
+    }
 }

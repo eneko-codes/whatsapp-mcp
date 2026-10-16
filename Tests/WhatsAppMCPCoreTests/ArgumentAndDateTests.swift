@@ -133,11 +133,23 @@ struct ArgumentAndDateTests {
             return (text, result.isError ?? false)
         }
 
+        func runChats(_ arguments: [String: Value]) async -> (String, Bool) {
+            let result = await tools.handle(.init(name: ToolCatalog.chatsName, arguments: arguments))
+            guard case .text(let text, _, _) = result.content.first else { return ("", true) }
+            return (text, result.isError ?? false)
+        }
+
         let (typo, typoError) = await run(["chat_id": .int(1), "from_me": .string("maybe")])
         #expect(typoError)
         #expect(typo.contains("from_me"))
         let (starred, starredError) = await run(["chat_id": .int(1), "starred_only": .string("yes")])
         #expect(starredError, Comment(rawValue: starred))
+
+        for filter in ["include_archived", "include_hidden"] {
+            let (text, isError) = await runChats([filter: .string("maybe")])
+            #expect(isError, Comment(rawValue: "\(filter): \(text)"))
+            #expect(text.contains(filter))
+        }
 
         // The string form of a real boolean still filters.
         let (mine, mineError) = await run(["chat_id": .int(1), "from_me": .string("true")])

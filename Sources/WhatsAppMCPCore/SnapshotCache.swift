@@ -272,8 +272,7 @@ public struct SnapshotCache: Sendable {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let url = recordURL(for: database)
-        try encoder.encode(record).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.write(try encoder.encode(record), to: url)
     }
 
     private func info(_ record: Record, database: AllowedDatabase, stale: Bool) -> SnapshotInfo {
@@ -306,18 +305,20 @@ public struct SnapshotCache: Sendable {
         // umask's 0644, and the first of them is the raw backup — keys and all — for as long
         // as the scrub takes. Created empty here, SQLite opens and keeps the existing mode
         // (and gives its journal the same one).
-        guard fileManager.createFile(
-            atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600])
-        else { throw SnapshotError.copyFailed(database, "could not create \(temporary.lastPathComponent)") }
-        // `rebuilt` cannot be pre-created: `VACUUM INTO` refuses an output file that exists,
-        // even an empty one. It is made owner-only by a restrictive umask around that one
-        // statement instead (see `PrivateUmask`).
+        // Registered before they exist: a signal that arrives between creating a file and
+        // registering it would leave the raw backup behind.
         ProcessCleanup.shared.register(path: temporary.path)
         ProcessCleanup.shared.register(path: rebuilt.path)
         defer {
             ProcessCleanup.shared.unregister(path: temporary.path)
             ProcessCleanup.shared.unregister(path: rebuilt.path)
         }
+        guard fileManager.createFile(
+            atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        else { throw SnapshotError.copyFailed(database, "could not create \(temporary.lastPathComponent)") }
+        // `rebuilt` cannot be pre-created: `VACUUM INTO` refuses an output file that exists,
+        // even an empty one. It is made owner-only by a restrictive umask around that one
+        // statement instead (see `PrivateUmask`).
         // The backup copies WhatsApp's "WAL mode" header into the new file, so SQLite creates
         // `-shm` and `-wal` beside it while it is open. Remove them with the temporary.
         defer {

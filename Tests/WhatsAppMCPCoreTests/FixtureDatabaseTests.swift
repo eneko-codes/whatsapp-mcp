@@ -759,6 +759,24 @@ struct FixtureDatabaseTests {
         #expect(message.mentions.first?.jid == "99020605243425@lid")
     }
 
+    @Test("When a LID has two profile-name rows the newest names it, in mentions too")
+    func mentionUsesTheNewestProfileName() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK)
+        try execute(
+            try #require(handle),
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (5, '99020605243425@lid', 'Ane Newer')")
+        sqlite3_close(handle)
+
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+        let page = try await store.messages(matching: MessageQuery(chatID: 3))
+        let message = try #require(page.rows.first { $0.id == 50 })
+        #expect(message.mentions.first?.name == "Ane Newer")
+        #expect(message.text == "ping @Ane Newer (99020605243425) are you free?")
+    }
+
     @Test("A mention naming an unknown LID is left as written and still listed")
     func mentionToUnknownLIDIsUnchanged() async throws {
         let fixture = try makeFixture()

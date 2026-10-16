@@ -22,7 +22,8 @@ public struct Configuration: Sendable, Equatable {
     /// the real cache.
     public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
 
-    /// The `ffmpeg` that converts audio macOS cannot open (WhatsApp voice notes are Ogg Opus).
+    /// The `ffmpeg` that converts what macOS cannot open itself: a video's sound track and
+    /// containers like Matroska.
     /// Nil means "look in Homebrew's two prefixes"; a path given here is used as it is.
     public var ffmpegPath: String?
 

@@ -31,9 +31,9 @@ cp "$BINARY" "$STAGE/server/$NAME"
 chmod +x "$STAGE/server/$NAME"
 
 # There is no embedded Info.plist, and none has been needed so far: audio_transcribe uses
-# SpeechAnalyzer, which ran from this bare ad-hoc binary with no permission prompt and no
-# usage description, and produced a transcript from the installed bundle under Claude
-# Desktop. If macOS ever demands NSSpeechRecognitionUsageDescription, embed an Info.plist
+# SpeechAnalyzer, which ran from this bare ad-hoc binary launched from a terminal with no
+# permission prompt and no usage description (not checked on a clean install under Claude
+# Desktop). If macOS ever demands NSSpeechRecognitionUsageDescription, embed an Info.plist
 # here with `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker <plist>`.
 #
 # The signature matters for something else: Full Disk Access, which reading WhatsApp's

@@ -667,6 +667,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         do {
             return try ReadOnlyDatabase(path: path)
         } catch {
+            if let failure = error as? ReadOnlyDatabase.OpenFailure, failure.isPermissionDenied {
+                throw ToolError.storeUnavailable(.accessDenied(path: path))
+            }
             guard FileManager.default.fileExists(atPath: path) else {
                 throw ToolError.storeUnavailable(.databaseMissing(path: path))
             }

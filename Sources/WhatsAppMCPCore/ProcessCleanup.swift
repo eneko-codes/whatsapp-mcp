@@ -22,6 +22,9 @@ public final class ProcessCleanup: @unchecked Sendable {
     public init() {}
 
     public func register(path: String) { lock.withLock { _ = paths.insert(path) } }
+
+    /// What is registered right now; a test asks whether a file it has seen was covered.
+    var registeredPaths: Set<String> { lock.withLock { paths } }
     public func unregister(path: String) { lock.withLock { _ = paths.remove(path) } }
 
     public func register(child process: Process) {

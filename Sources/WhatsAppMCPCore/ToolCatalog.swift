@@ -403,8 +403,8 @@ public enum ToolCatalog {
 
             The result is an automatic transcription and can contain errors. Results are \
             kept in ~/Library/Caches/whatsapp-mcp so the same audio is recognised once. \
-            Voice notes, MP3 and M4A open directly; a video's sound track and other containers \
-            need ffmpeg installed, and only plain audio or video containers are handed to it.
+            On macOS 27 voice notes, MP3 and M4A open directly; a video's sound track, other \
+            containers and possibly voice notes on older macOS need ffmpeg installed, and only plain audio or video containers are handed to it.
             """,
         inputSchema: object(properties: [
             "message_id": integer(

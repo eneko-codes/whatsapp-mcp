@@ -25,10 +25,17 @@ enum FileAccess: Equatable {
             close(descriptor)
             return .readable
         }
-        switch errno {
+        return classify(errno)
+    }
+
+    /// `EPERM` is what macOS answers a missing privacy grant with; `EACCES` is a file whose
+    /// own permissions refuse. A test can only create the second on its own, so the mapping
+    /// is a function of its own where both can be checked.
+    static func classify(_ code: Int32) -> FileAccess {
+        switch code {
         case ENOENT, ENOTDIR: return .missing
         case EPERM, EACCES: return .denied
-        case let code: return .other(code)
+        default: return .other(code)
         }
     }
 }

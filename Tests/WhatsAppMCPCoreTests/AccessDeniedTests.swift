@@ -57,6 +57,32 @@ struct AccessDeniedTests {
         #expect(FileAccess.probe(fifo.path) == .readable)
     }
 
+    @Test("EPERM — what macOS answers a missing privacy grant with — is a denial, like EACCES")
+    func errnoMapping() {
+        #expect(FileAccess.classify(EPERM) == .denied)
+        #expect(FileAccess.classify(EACCES) == .denied)
+        #expect(FileAccess.classify(ENOENT) == .missing)
+        #expect(FileAccess.classify(ENOTDIR) == .missing)
+        #expect(FileAccess.classify(EIO) == .other(EIO))
+        #expect(FileAccess.classify(ELOOP) == .other(ELOOP))
+    }
+
+    @Test("Damage codes are told apart from a permission refusal, extended codes included")
+    func damageClassification() {
+        typealias Open = ReadOnlyDatabase.OpenFailure
+        #expect(Open(code: SQLITE_IOERR, detail: "").isDamaged)
+        #expect(Open(code: SQLITE_CORRUPT, detail: "").isDamaged)
+        #expect(Open(code: SQLITE_NOTADB, detail: "").isDamaged)
+        #expect(Open(code: SQLITE_CANTOPEN, detail: "").isDamaged)
+        #expect(Open(code: SQLITE_IOERR | (1 << 8), detail: "").isDamaged)  // extended result code
+        // A cannot-open that is really a refusal must not trigger a pointless recopy.
+        #expect(!Open(code: SQLITE_CANTOPEN, detail: "", systemErrno: EPERM).isDamaged)
+        #expect(!Open(code: SQLITE_AUTH, detail: "").isDamaged)
+        #expect(!Open(code: SQLITE_BUSY, detail: "").isDamaged)
+        #expect(ReadOnlyDatabase.QueryFailure(sql: "", detail: "", code: SQLITE_IOERR).isDamaged)
+        #expect(!ReadOnlyDatabase.QueryFailure(sql: "", detail: "", code: SQLITE_ERROR).isDamaged)
+    }
+
     @Test("SQLite's refusal codes and errno values all count as a denial; absence does not")
     func openFailureClassification() {
         typealias Failure = ReadOnlyDatabase.OpenFailure
@@ -81,6 +107,7 @@ struct AccessDeniedTests {
         let (chats, chatsError) = await call(tools, ToolCatalog.chatsName)
         #expect(chatsError)
         #expect(chats.contains("Full Disk Access"))
+        #expect(chats.contains("needs Full Disk"), "the sentence that says what is needed")
         #expect(chats.contains("Privacy & Security"))
         #expect(chats.contains("after every update"))
         #expect(!chats.localizedCaseInsensitiveContains("not a permissions problem"))

@@ -528,6 +528,8 @@ struct FFmpegPinningTests {
         #expect(demuxer(ascii("RIFF") + [0, 0, 0, 0] + ascii("AVI ")) == nil)
         #expect(demuxer(ascii("FORM") + [0, 0, 0, 0] + ascii("AIFF")) == "aiff")
         #expect(demuxer(ascii("fLaC")) == "flac")
+        #expect(demuxer(ascii("caff") + [0, 1]) == "caf")
+        #expect(demuxer(ascii("FORM") + [0, 0, 0, 0] + ascii("AIFC")) == "aiff")
         #expect(demuxer([0x1A, 0x45, 0xDF, 0xA3]) == "matroska")
         #expect(demuxer([0, 0, 0, 0x1C] + ascii("ftypM4A ")) == "mov")
         #expect(demuxer([0, 0, 0, 8] + ascii("moov")) == "mov")
@@ -567,6 +569,7 @@ struct FFmpegPinningTests {
                 Issue.record("\(name) was transcribed"); continue
             }
             #expect(error as? TranscriptionError == .unsupportedFormat, Comment(rawValue: name))
+            #expect(TranscriptionError.unsupportedFormat.message.contains("playlist"))
             #expect(runs.isEmpty, Comment(rawValue: "ffmpeg ran for \(name)"))
         }
     }

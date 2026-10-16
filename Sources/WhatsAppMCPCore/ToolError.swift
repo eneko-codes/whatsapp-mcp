@@ -118,9 +118,10 @@ public enum ToolError: Error, Equatable {
           1. Open System Settings → Privacy & Security → Full Disk Access.
           2. Turn on (or add with +) the program that runs this server. Claude Desktop runs
              it through its own helper, so look for "whatsapp-mcp"; the exact path is on
-             the `binary:` line of whatsapp_status. If you run it by hand, it is the
-             terminal or app you started it from.
-          3. Quit that app completely and open it again.
+             the `binary:` line of whatsapp_status. If something else starts it — Claude
+             Code (its `claude` program) or a terminal — it is that program instead.
+          3. Quit the app that starts the server (Claude Desktop, or the one in step 2)
+             completely and open it again.
 
         Each rebuilt or updated copy of this server is a new program to macOS: the grant
         given to the old one does not carry over, so repeat this after every update.

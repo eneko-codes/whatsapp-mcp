@@ -81,9 +81,9 @@ public enum TranscriptionError: Error, Equatable {
 
         case .converterMissing:
             return """
-                This file is in a format macOS cannot open on its own (macOS opens Ogg Opus voice \
-                notes, MP3 and M4A itself; a video's sound track and some other containers need \
-                a converter), and ffmpeg was not found.
+                macOS could not open this file on its own (a video's sound track and some containers \
+                need a converter, and on older macOS versions so may Ogg Opus voice notes), \
+                and ffmpeg was not found.
 
                 Install it with `brew install ffmpeg`, or point this server at it with \
                 `--ffmpeg /path/to/ffmpeg`. It runs locally, on this one file, with no network.
@@ -312,8 +312,7 @@ public struct TranscriptionService: Sendable {
 
     private func store(_ transcription: Transcription, at url: URL) throws {
         try makePrivateDirectory(transcriptsDirectory)
-        try JSONEncoder().encode(transcription).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.write(try JSONEncoder().encode(transcription), to: url)
     }
 
     private func makePrivateDirectory(_ url: URL) throws {
