@@ -233,7 +233,25 @@ public struct Format: Sendable {
         [snapshotLine(snapshot), count, ""]
     }
 
-    public func calls(_ calls: [CallEvent], snapshot: SnapshotInfo) -> String {
+    /// A list that stopped at its limit has to say so, or it reads as everything there is.
+    /// Only "may be more": a list of exactly `limit` rows is indistinguishable from a cut one
+    /// without a second query, and a false alarm costs a call where a false all-clear costs
+    /// a wrong answer. `pagedWithOffset` tools say how to reach the next page; the others can
+    /// only be widened.
+    func limitNote(shown: Int, limit: Int?, offset: Int = 0, pagedWithOffset: Bool) -> [String] {
+        guard let limit, shown >= limit else { return [] }
+        let how =
+            pagedWithOffset
+            ? "pass offset=\(offset + shown) for the next page"
+            : (limit < Configuration.pageSizeRange.upperBound
+                ? "raise limit (at most \(Configuration.pageSizeRange.upperBound))"
+                : "narrow the request")
+        return ["", "Stopped at the limit of \(limit); there may be more: \(how)."]
+    }
+
+    public func calls(_ calls: [CallEvent], snapshot: SnapshotInfo, limit: Int? = nil, offset: Int = 0)
+        -> String
+    {
         guard !calls.isEmpty else { return snapshotLine(snapshot) + "\n\nNo calls found." }
         var lines = header(snapshot, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
         for call in calls {
@@ -255,10 +273,13 @@ public struct Format: Sendable {
             }
             lines.append(parts.joined(separator: " · "))
         }
+        lines += limitNote(shown: calls.count, limit: limit, offset: offset, pagedWithOffset: true)
         return lines.joined(separator: "\n")
     }
 
-    public func locationSharing(_ sharing: LocationSharing, snapshot: SnapshotInfo) -> String {
+    public func locationSharing(_ sharing: LocationSharing, snapshot: SnapshotInfo, limit: Int? = nil)
+        -> String
+    {
         var lines = header(
             snapshot,
             "\(sharing.outgoing.count) sharing session(s) you started, "
@@ -273,6 +294,10 @@ public struct Format: Sendable {
                 "recipient \(item.jid ?? "unknown") in \(item.chat ?? "unknown chat") · expires "
                     + when(item.expires))
         }
+        // Each list has its own limit.
+        lines += limitNote(
+            shown: max(sharing.outgoing.count, sharing.recipients.count), limit: limit,
+            pagedWithOffset: false)
         return lines.joined(separator: "\n")
     }
 
@@ -292,8 +317,9 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func labeledEntities(_ entities: [LabeledEntity], label: Label, snapshot: SnapshotInfo)
-        -> String
+    public func labeledEntities(
+        _ entities: [LabeledEntity], label: Label, snapshot: SnapshotInfo, limit: Int? = nil
+    ) -> String
     {
         var lines = header(
             snapshot, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
@@ -303,10 +329,13 @@ public struct Format: Sendable {
                     + (entity.entityType.map { " · entity type \($0)" } ?? "")
                     + " · \(when(entity.date))")
         }
+        lines += limitNote(shown: entities.count, limit: limit, pagedWithOffset: false)
         return lines.joined(separator: "\n")
     }
 
-    public func addressBook(_ entries: [AddressBookEntry], snapshot: SnapshotInfo) -> String {
+    public func addressBook(
+        _ entries: [AddressBookEntry], snapshot: SnapshotInfo, limit: Int? = nil, offset: Int = 0
+    ) -> String {
         guard !entries.isEmpty else { return snapshotLine(snapshot) + "\n\nNo entries found." }
         var lines = header(snapshot, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
         for entry in entries {
@@ -319,6 +348,7 @@ public struct Format: Sendable {
             if let about = entry.about { parts.append("about: \(about)") }
             lines.append(parts.joined(separator: " · "))
         }
+        lines += limitNote(shown: entries.count, limit: limit, offset: offset, pagedWithOffset: true)
         return lines.joined(separator: "\n")
     }
 
@@ -345,7 +375,7 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func channels(_ channels: [Channel], snapshot: SnapshotInfo) -> String {
+    public func channels(_ channels: [Channel], snapshot: SnapshotInfo, limit: Int? = nil) -> String {
         guard !channels.isEmpty else { return snapshotLine(snapshot) + "\n\nNo channels found." }
         var lines = header(snapshot, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
         for channel in channels {
@@ -353,6 +383,7 @@ public struct Format: Sendable {
             if let by = channel.addedByName ?? channel.addedByLID { line += " · added by \(by)" }
             lines.append(line)
         }
+        lines += limitNote(shown: channels.count, limit: limit, pagedWithOffset: false)
         return lines.joined(separator: "\n")
     }
 
@@ -390,6 +421,9 @@ public struct Format: Sendable {
                 "Pinned chats come first, as they do in WhatsApp, so this list is not "
                     + "purely newest-first. Their dates are real.")
         }
+        lines += limitNote(
+            shown: chats.count, limit: query.limit, offset: query.offset, pagedWithOffset: true)
+        lines.append("")
         lines.append("Use chat_get with an id from the first column.")
         return lines.joined(separator: "\n")
     }

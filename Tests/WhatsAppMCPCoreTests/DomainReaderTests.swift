@@ -247,6 +247,38 @@ struct DomainReaderTests {
         #expect(location.contains("recipient 34000000002@s.whatsapp.net"))
     }
 
+    @Test("A call list that stopped at its limit says there may be more, and how to get them")
+    func cutCallListSaysSo() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try callHistory(fake)
+        let (cut, cutError) = await call(fake.tools(), ToolCatalog.callsName, ["limit": .int(1)])
+        #expect(!cutError, Comment(rawValue: cut))
+        #expect(cut.contains("Stopped at the limit of 1; there may be more: pass offset=1"))
+
+        let (next, _) = await call(
+            fake.tools(), ToolCatalog.callsName, ["limit": .int(1), "offset": .int(1)])
+        #expect(next.contains("pass offset=2"))
+
+        let (whole, _) = await call(fake.tools(), ToolCatalog.callsName, ["limit": .int(50)])
+        #expect(!whole.contains("Stopped at the limit"))
+    }
+
+    @Test("A cut list without offset paging says to raise the limit")
+    func cutChannelListSaysSo() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.build(
+            .extendedChat,
+            [
+                "CREATE TABLE channel_metadata (channel_metadata_id INTEGER PRIMARY KEY, channel_jid TEXT NOT NULL, channel_name TEXT, added_by_lid TEXT, added_by_push_name TEXT)",
+                "INSERT INTO channel_metadata VALUES (1, '1@newsletter', 'Invented A', NULL, NULL), (2, '2@newsletter', 'Invented B', NULL, NULL)",
+            ])
+        let (cut, _) = await call(fake.tools(), ToolCatalog.channelsName, ["limit": .int(1)])
+        #expect(cut.contains("Stopped at the limit of 1; there may be more: raise limit"))
+        #expect(!cut.contains("offset="))
+    }
+
     @Test("Without a reader the domain tools say so instead of crashing")
     func readerIsOptional() async {
         let tools = WhatsAppTools(store: FakeWhatsAppStore(), calendar: Fixtures.calendar)
