@@ -345,6 +345,16 @@ final class ReadOnlyDatabase {
 
         func int(_ index: Int32) -> Int64 { sqlite3_column_int64(statement, index) }
 
+        /// A blob column's bytes, copied. Nil for NULL; an empty blob is empty data.
+        func data(_ index: Int32) -> Data? {
+            guard !isNull(index) else { return nil }
+            let count = Int(sqlite3_column_bytes(statement, index))
+            guard count > 0, let pointer = sqlite3_column_blob(statement, index) else {
+                return Data()
+            }
+            return Data(bytes: pointer, count: count)
+        }
+
         func bool(_ index: Int32) -> Bool { sqlite3_column_int64(statement, index) != 0 }
 
         func isNull(_ index: Int32) -> Bool {

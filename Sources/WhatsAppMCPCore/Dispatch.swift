@@ -148,6 +148,13 @@ public struct WhatsAppTools: Sendable {
         var query = try messageQuery(arguments)
         query.chatID = try arguments.optionalInt("chat_id")
         query.text = arguments.optionalString("query")
+        // Without a phrase this would be "every message", which is chat_get's job. Starred
+        // messages are the one list across chats that has no other tool.
+        guard query.text != nil || query.starredOnly else {
+            throw ToolError.badArgument(
+                name: "query",
+                reason: "give a phrase to find, or starred_only=true to list starred messages in every chat")
+        }
 
         return format.searchResults(try await store.messages(matching: query), query: query)
     }

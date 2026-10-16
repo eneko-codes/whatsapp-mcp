@@ -50,8 +50,8 @@ and macOS ties that grant to the exact program: every rebuilt or updated copy ne
 | `whatsapp_status` | read | Reports whether WhatsApp's local database can be read, how much is in it, what WhatsApp does not store locally at all, and what to do about anything missing. Reads no messages. |
 | `chats_list` | read | Lists conversations with their id, kind, unread count, how many messages are stored, and when the last one arrived. |
 | `chat_get` | read | A page of messages from one chat, newest first by default, each line saying who sent it and what the message is. |
-| `whatsapp_search` | read | Finds messages whose text contains a phrase, across every chat or within one. Ignores case and accents, so "angel" finds "Ángel". |
-| `message_get` | read | Everything the database holds about one message: mentions, both timestamps, an attachment's path/size/length/author, a shared contact's full vCard, a link preview, a group event's actor and subject, and the raw delivery and error codes. |
+| `whatsapp_search` | read | Finds messages whose text contains a phrase, across every chat or within one. Ignores case and accents, so "angel" finds "Ángel". With `starred_only` the phrase can be left out, which lists every starred message in every chat. |
+| `message_get` | read | Everything the database holds about one message: mentions, both timestamps, an attachment's path/size/length/author, a shared contact's full vCard, a link preview, a group event's actor and subject, the message it replies to (with the quoted words), who reacted with which emoji and when, and the raw delivery and error codes. |
 | `media_list` | read | What was shared rather than said — photos, videos, GIFs, stickers, voice notes, audio, documents, locations, contact cards — with the message id each belongs to and the file's path on this Mac when it's here. |
 | `group_get` | read | A group's own metadata (created when, by whom, name last changed) and every member row with its address, resolved name and admin flag. |
 | `media_get` | read | The facts about the file behind an attachment: real path under `Message/`, MIME type, exact size, SHA-256, chat, sender and date. Says so when the file is not on this Mac. |
@@ -185,6 +185,10 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 - A message deleted for everyone shows only that a deletion happened, with its sender and
   date. The original text is not recoverable, and the row it replaced cannot even be
   identified — WhatsApp clears it in place with no second copy and no link back.
+- Who starred a message, and when. A star is a yes/no flag on the message; nothing else is stored.
+- Reactions come with the reactor's address when WhatsApp stored one. Some entries (seen on
+  messages from other people) name nobody; they are reported as "reactor not recorded", not
+  assumed to be you.
 - Delivery/read status is reported as a raw number, never as a word. Ten distinct codes exist
   in the wild and none has been confirmed against WhatsApp's own interface, so no tool here
   will claim a message was "read" on the strength of a guess.

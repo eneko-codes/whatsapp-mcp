@@ -4,7 +4,7 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.1.1"
+    public static let version = "1.2.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and writes only its own cache, that
@@ -36,8 +36,10 @@ public enum WhatsAppMCPServer {
         there were unwritten changes pending and when each copy was taken.
 
         Workflow: chats_list to see what exists, chat_get for one conversation, \
-        whatsapp_search across all of them, message_get to open one message up, media_list \
-        for what was shared rather than said, group_get for a group's roster. To open an \
+        whatsapp_search across all of them (with starred_only=true and no phrase it lists \
+        every starred message), message_get to open one message up — it shows the message \
+        a reply quotes and who reacted with which emoji — media_list for what was shared \
+        rather than said, group_get for a group's roster. To open an \
         attachment: media_get for the file's facts, media_view to see a photo, read a PDF or \
         see a video's frames, audio_transcribe for sound. Beyond messages: calls_list, \
         location_sharing_list, labels_list, address_book_list, channels_list and \
@@ -62,7 +64,8 @@ public enum WhatsAppMCPServer {
         not measured); any disappearing-message setting or TTL; the text of a message \
         deleted for everyone, which WhatsApp clears in place with no second copy and no link \
         to what it replaced; and any meaning for a delivery code, which is stored as a \
-        number nobody has matched to sent, delivered or read. Say so plainly rather than \
+        number nobody has matched to sent, delivered or read; and who starred a message or \
+        when, since a star is only a yes/no flag. Say so plainly rather than \
         implying the data might be found another way.
 
         WhatsApp status updates are not covered: the structure of that database could not \

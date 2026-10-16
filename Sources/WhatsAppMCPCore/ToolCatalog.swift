@@ -212,10 +212,15 @@ public enum ToolCatalog {
 
             Searches text only. A photo, sticker or voice note with no caption has no \
             text to match, so use media_list for those.
+
+            With starred_only=true the phrase can be left out, which lists every starred \
+            message in every chat. WhatsApp stores only that a message is starred: not who \
+            starred it and not when.
             """,
         inputSchema: object(
             properties: [
-                "query": string("Text to find inside a message."),
+                "query": string(
+                    "Text to find inside a message. May be omitted only with starred_only=true."),
                 "chat_id": integer(
                     "Optional chat id from chats_list. Omit to search every chat.",
                     minimum: 1, maximum: Int.max),
@@ -228,7 +233,7 @@ public enum ToolCatalog {
                 "limit": limitProperty,
                 "offset": offsetProperty,
             ],
-            required: ["query"]),
+            required: []),
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,
             openWorldHint: false)
@@ -242,8 +247,9 @@ public enum ToolCatalog {
             mention resolved and listed, who sent it and their WhatsApp address, both \
             timestamps, whether it is starred, an attachment's file path, size, length, \
             author and WhatsApp server URL, a shared contact's full vCard, a link \
-            preview's title and summary, a group event's actor and subject, and the raw \
-            delivery and error codes.
+            preview's title and summary, a group event's actor and subject, the message \
+            it replies to (with the quoted words), who reacted with which emoji and when, \
+            and the raw delivery and error codes.
 
             Use it when a line from chat_get or whatsapp_search needs opening up. The \
             delivery code is reported as the number WhatsApp stored: this server has not \
