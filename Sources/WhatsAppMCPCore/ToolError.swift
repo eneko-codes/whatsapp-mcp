@@ -10,6 +10,11 @@ public enum ToolError: Error, Equatable {
     case messageNotFound(id: Int64)
     case notAGroup(id: Int64, kind: ChatKind)
     case storeFailure(String)
+    case databaseNotAllowed(String)
+    case queryRefused(String)
+    case explorerUnavailable
+    case noAttachment(id: Int64)
+    case mediaProblem(String)
 
     public var message: String {
         switch self {
@@ -63,6 +68,33 @@ public enum ToolError: Error, Equatable {
 
         case .storeFailure(let detail):
             return "WhatsApp's database returned an error: \(detail)"
+
+        case .databaseNotAllowed(let name):
+            return """
+                '\(name)' is not a database this server reads.
+
+                Choose one of: \(AllowedDatabase.allCases.map(\.rawValue).joined(separator: ", ")).
+                The list is fixed on purpose: WhatsApp's container also holds encryption
+                keys and other files that no tool here will open, whatever they are called.
+                """
+
+        case .queryRefused(let detail):
+            return "db_query refused the statement: \(detail)."
+
+        case .noAttachment(let id):
+            return """
+                Message \(id) has no attachment file.
+
+                Only photos, videos, GIFs, stickers, voice notes, audio files and documents
+                have one. A shared location or contact card is read with message_get, which
+                carries its whole content.
+                """
+
+        case .mediaProblem(let detail):
+            return detail
+
+        case .explorerUnavailable:
+            return "The database tools are not configured in this server."
         }
     }
 

@@ -74,6 +74,17 @@ struct WhatsAppToolsTests {
         #expect(Set(declared ?? []) == Set(ToolCatalog.all().map(\.name)))
     }
 
+    /// The installer keys on the manifest version alone, so a build whose constant and
+    /// manifest disagree is one nobody can tell apart from the last.
+    @Test("The server's version constant matches the manifest's")
+    func versionMatchesTheManifest() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("extension/manifest.json"))
+        let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(manifest?["version"] as? String == WhatsAppMCPServer.version)
+    }
+
     /// Claude Desktop's schema sanitiser drops a property whose `type` is a union and
     /// hands the model a bare `{}` instead, which stays invisible until a caller happens
     /// to use that field.
@@ -137,8 +148,9 @@ struct WhatsAppToolsTests {
         #expect(text.contains("ZWAMESSAGEDATAITEM"))
     }
 
-    /// The schema was searched exhaustively for a LID→phone mapping and none exists — see
-    /// the comment on `JIDDisplay`. That is a claim about data this server will never be
+    /// `ChatStorage` was searched exhaustively for a LID→phone mapping and none exists — see
+    /// the comment on `JIDDisplay`. Other databases do have pairing tables, which is what
+    /// `lid_lookup` is for, so the status line is scoped to the chat database. That is a claim about data this server will never be
     /// able to produce, not an implementation gap, so `whatsapp_status` says so up front
     /// rather than leaving a caller to discover it by asking `group_get` or `message_get`
     /// for a phone number a `…@lid` sender simply does not carry.
@@ -146,7 +158,8 @@ struct WhatsAppToolsTests {
     func statusStatesNoLIDToPhoneMapping() async {
         let (text, isError) = await call(ToolCatalog.statusName, store: stocked())
         #expect(!isError)
-        #expect(text.contains("no LID\u{2192}phone mapping"))
+        #expect(text.contains("no LID\u{2192}phone mapping in the chat database"))
+        #expect(text.contains("lid_lookup"))
     }
 
     /// Same shape of claim as the LID mapping above: `ZWACHATSESSION` and `ZWAMESSAGE` were
@@ -489,13 +502,21 @@ struct WhatsAppToolsTests {
         #expect(isError)
     }
 
+    /// The only tools allowed to say they are not read-only, and only because they keep a
+    /// result in `~/Library/Caches/whatsapp-mcp`. Naming them here means a tool that starts
+    /// writing something else has to be added to this list on purpose.
+    private static let cacheWriters: Set<String> = [ToolCatalog.audioTranscribeName]
+
     /// The whole catalogue, not a hard-coded list: a tool added later that could send,
     /// edit or delete would have to declare itself here, and this fails when it does.
-    /// This server reads and nothing else, and that is the property worth pinning.
-    @Test("Every tool in the catalogue is read-only")
+    /// This server reads WhatsApp and never changes it, and that is the property worth
+    /// pinning; the one tool that writes its own cache is named above.
+    @Test("Every tool in the catalogue is read-only, except those that only keep a cache")
     func everyToolIsReadOnly() {
         for tool in ToolCatalog.all() {
-            #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
+            if !Self.cacheWriters.contains(tool.name) {
+                #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
+            }
             #expect(tool.annotations.destructiveHint != true, "\(tool.name) claims to destroy")
             #expect(tool.annotations.openWorldHint != true, "\(tool.name) claims to leave this Mac")
         }

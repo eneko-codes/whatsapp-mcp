@@ -1,6 +1,7 @@
 import Foundation
 
-/// The only type that opens WhatsApp's own database.
+/// The only type that reads the chat store directly. `SnapshotCache` also opens WhatsApp's
+/// other databases, once each per change, to copy them.
 ///
 /// Everything above the `WhatsAppStore` protocol is driven by a fake in the tests; this
 /// file is driven by a fixture database the suite builds in a temporary directory, with
@@ -482,7 +483,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     private func resolvedMediaPath(_ storedPath: String?) -> String? {
         guard let storedPath, !storedPath.isEmpty else { return nil }
         let absolute = mediaRoot.appendingPathComponent(storedPath).path
-        return FileManager.default.fileExists(atPath: absolute) ? absolute : nil
+        // A stored path with `..` in it, or a link that leads out of `Message/`, is not a
+        // file this server reports: every media tool opens what this returns.
+        return MediaFiles.contained(absolute, in: mediaRoot)?.path
     }
 
     // MARK: Groups

@@ -1,12 +1,13 @@
 import Foundation
 
-/// There is nothing to configure. The per-tool allow/ask/prohibit switch in Claude
+/// Reading needs no configuration. The per-tool allow/ask/prohibit switch in Claude
 /// Desktop is the whole of this server's configuration surface.
 ///
-/// `--database` is the one flag parsed from the command line, and it is not a
-/// `user_config` setting at all — nothing in `extension/manifest.json` sets it. It exists
-/// for manual verification, so a manual run can be pointed at a copy of the database
-/// instead of the live file.
+/// `--database`, `--cache-directory` and `--ffmpeg` are the flags parsed from the command
+/// line, and none is a `user_config` setting — nothing in `extension/manifest.json` sets
+/// them. The first two exist for manual verification, so a run can be pointed at a copy of
+/// the container and at a throwaway cache instead of the live ones; `--ffmpeg` names the
+/// converter when it is not in one of Homebrew's two prefixes.
 public struct Configuration: Sendable, Equatable {
     /// Default page size for `chats_list`, `chat_get`, `whatsapp_search` and `media_list`.
     /// A tool's own `limit` still wins.
@@ -16,7 +17,22 @@ public struct Configuration: Sendable, Equatable {
     /// run can be pointed elsewhere without the live file ever being opened.
     public var databasePath: String = Configuration.defaultDatabasePath
 
+    /// Where the private copies read by `db_*` are kept — the only place this server
+    /// writes. Overridable from the command line so a manual run or a test never touches
+    /// the real cache.
+    public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
+
+    /// The `ffmpeg` that converts audio macOS cannot open (WhatsApp voice notes are Ogg Opus).
+    /// Nil means "look in Homebrew's two prefixes"; a path given here is used as it is.
+    public var ffmpegPath: String?
+
     public init() {}
+
+    /// WhatsApp's container is the directory the chat database sits in, so pointing
+    /// `--database` at a copy moves every `db_*` read to that copy's directory as well.
+    public var containerDirectory: URL {
+        URL(fileURLWithPath: databasePath).deletingLastPathComponent()
+    }
 
     /// WhatsApp's group container. Not TCC-protected, unlike `~/Library/Messages`, which
     /// is what makes the whole read path possible with no grant and no prompt.
@@ -58,6 +74,24 @@ public struct Configuration: Sendable, Equatable {
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         configuration.databasePath = (trimmed as NSString).expandingTildeInPath
+                    }
+                }
+                index += 2
+
+            case "--ffmpeg":
+                if let value, !isPlaceholder(value) {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        configuration.ffmpegPath = (trimmed as NSString).expandingTildeInPath
+                    }
+                }
+                index += 2
+
+            case "--cache-directory":
+                if let value, !isPlaceholder(value) {
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        configuration.cacheDirectory = (trimmed as NSString).expandingTildeInPath
                     }
                 }
                 index += 2

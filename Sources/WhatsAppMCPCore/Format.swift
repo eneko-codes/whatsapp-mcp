@@ -20,7 +20,8 @@ public struct Format: Sendable {
     // MARK: Status
 
     public func status(
-        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String
+        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String,
+        snapshots: [SnapshotInfo] = []
     ) -> String {
         var lines = ["whatsapp-mcp \(WhatsAppMCPServer.version)"]
         lines.append("binary: \(binaryPath)")
@@ -64,19 +65,277 @@ public struct Format: Sendable {
         lines.append("  permission: none needed — this container is not TCC-protected")
 
         lines.append("")
-        lines.append("This server is read-only. It has no tool that sends, edits or")
-        lines.append("deletes anything, and no way to reach WhatsApp's network at all.")
+        lines.append("COPIES · private snapshots read by db_tables, db_schema and db_query")
+        if snapshots.isEmpty {
+            lines.append("  none yet — a database is copied the first time a db_* tool reads it")
+        }
+        for snapshot in snapshots {
+            var line =
+                "  \(snapshot.database.rawValue): copied \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
+            if snapshot.stale { line += " — STALE, the source has changed since" }
+            if snapshot.walPending { line += " — WhatsApp had unwritten changes pending" }
+            lines.append(line)
+        }
+
+        lines.append("")
+        lines.append("This server never changes WhatsApp. It has no tool that sends, edits or")
+        lines.append("deletes anything, and no way to reach any network. It writes only its own")
+        lines.append("cache, ~/Library/Caches/whatsapp-mcp (copies listed above, transcripts).")
 
         // Things a caller will otherwise assume are merely missing from this server,
         // rather than absent from WhatsApp's own storage. Every one was established by
         // checking each table and column name in the schema.
         lines.append("")
         lines.append("NOT IN THIS DATABASE · things WhatsApp does not store locally")
-        lines.append("  no LID→phone mapping: a …@lid sender with no profile name stays a LID")
+        lines.append("  no LID→phone mapping in the chat database: a …@lid sender with no profile name stays "
+                    + "a LID there. lid_lookup reads separate pairing tables whose coverage is not measured")
         lines.append("  no disappearing-message setting or TTL, per chat or per message")
         lines.append("  no recoverable text for a deleted message, and no link to what it replaced")
         lines.append("  no meaning for a delivery code: the number is stored, the wording is not")
 
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Raw databases
+
+    func snapshotLine(_ snapshot: SnapshotInfo) -> String {
+        var line =
+            "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
+        if snapshot.walPending { line += " · WhatsApp had unwritten changes pending, not in the copy" }
+        return line
+    }
+
+    public func databaseTables(_ entries: [TableEntry], snapshot: SnapshotInfo) -> String {
+        var lines = [snapshotLine(snapshot), "\(entries.count) tables and views", ""]
+        lines += entries.map { "\($0.name)  [\($0.kind)]" }
+        return lines.joined(separator: "\n")
+    }
+
+    public func databaseSchema(_ statements: [String], snapshot: SnapshotInfo) -> String {
+        guard !statements.isEmpty else {
+            return snapshotLine(snapshot) + "\n\nNo such table or view in this database."
+        }
+        return ([snapshotLine(snapshot), ""] + statements.map { $0 + ";" }).joined(separator: "\n")
+    }
+
+    /// Tab-separated, because a SQL value can contain a comma and cannot contain a tab
+    /// without it being visible. A tab or newline inside a value is replaced by a space
+    /// so one row is always one line.
+    public func queryResult(_ result: QueryResult, limit: Int) -> String {
+        var lines = [snapshotLine(result.snapshot)]
+        lines.append(
+            "\(result.rows.count) row\(result.rows.count == 1 ? "" : "s")"
+                + (result.truncated ? " · more rows exist, stopped at the row limit (\(limit)) or the output size cap" : ""))
+        lines.append("")
+        lines.append(result.columns.joined(separator: "\t"))
+        for row in result.rows {
+            lines.append(
+                row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
+                    .joined(separator: "\t"))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Attachment files
+
+    private func sender(_ message: Message) -> String {
+        if message.isFromMe { return "you" }
+        return message.sender?.displayName ?? message.chatName
+    }
+
+    public func mediaHeading(_ message: Message, attachment: Attachment) -> String {
+        "message \(message.id) · \(MediaKind(attachment.kind).rawValue) · chat \(message.chatName) · "
+            + "from \(sender(message)) · \(DateParsing.roundTrip(message.date, calendar: calendar))"
+            + (message.text.map { "\ncaption: \($0)" } ?? "")
+    }
+
+    public func mediaMissing(_ message: Message, attachment: Attachment) -> String {
+        mediaHeading(message, attachment: attachment)
+            + "\n\nThe file is not on this Mac. WhatsApp keeps the message row after it evicts "
+            + "the file, so this does not mean the message is gone."
+            + (attachment.fileSize.map { "\nWhatsApp recorded a size of \($0) bytes." } ?? "")
+    }
+
+    public func mediaFacts(
+        _ message: Message, attachment: Attachment, url: URL, facts: MediaFiles.FileFacts
+    ) -> String {
+        var lines = [mediaHeading(message, attachment: attachment), ""]
+        lines.append("path: \(url.path)")
+        lines.append("type: \(facts.mimeType)")
+        lines.append("size: \(facts.byteCount) bytes")
+        lines.append("sha256: \(facts.sha256)")
+        if let recorded = attachment.fileSize, recorded != facts.byteCount {
+            lines.append("note: WhatsApp's row records \(recorded) bytes; the file on disk differs")
+        }
+        if let title = attachment.title { lines.append("title: \(title)") }
+        if let seconds = attachment.duration { lines.append("duration: \(seconds) s") }
+        return lines.joined(separator: "\n")
+    }
+
+    private func clock(_ seconds: Double) -> String {
+        let whole = Int(seconds.rounded(.down))
+        return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+
+    public func transcription(_ result: Transcription, heading: String?) -> String {
+        var lines: [String] = []
+        if let heading { lines += [heading, ""] }
+        lines.append(
+            "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition · language "
+                + "\(result.localeIdentifier) · duration \(clock(result.durationSeconds))"
+                + (result.fromCache ? " · from this server's cache" : "")
+                + " — it can contain errors.")
+        lines.append("")
+        guard !result.segments.isEmpty else {
+            lines.append("No speech was recognised.")
+            return lines.joined(separator: "\n")
+        }
+        for segment in result.segments {
+            lines.append("[\(clock(segment.start))–\(clock(segment.end))] \(segment.text)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func documentText(_ document: MediaFiles.PDFText, pdf: Bool) -> String {
+        if document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return pdf
+                ? "\(document.pageCount) page(s) and no text layer: this is a scan, and reading its pixels is not done here."
+                : "The document is empty."
+        }
+        return (pdf ? "\(document.pageCount) page(s)\n\n" : "")
+            + document.text + (document.truncated ? "\n\n[cut here: the text is longer than the limit]" : "")
+    }
+
+    // MARK: Beyond the chat store
+
+    private func when(_ date: Date?) -> String {
+        date.map { DateParsing.roundTrip($0, calendar: calendar) } ?? "unknown time"
+    }
+
+    private func header(_ snapshot: SnapshotInfo, _ count: String) -> [String] {
+        [snapshotLine(snapshot), count, ""]
+    }
+
+    public func calls(_ calls: [CallEvent], snapshot: SnapshotInfo) -> String {
+        guard !calls.isEmpty else { return snapshotLine(snapshot) + "\n\nNo calls found." }
+        var lines = header(snapshot, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
+        for call in calls {
+            var parts = ["\(call.id)  \(when(call.date))"]
+            if let incoming = call.incoming { parts.append(incoming ? "incoming" : "outgoing") }
+            if let video = call.video { parts.append(video ? "video" : "voice") }
+            if call.missed == true { parts.append("missed") }
+            if let seconds = call.durationSeconds {
+                parts.append("duration \(Int(seconds.rounded()))s")
+            }
+            if let code = call.outcomeCode { parts.append("outcome code \(code)") }
+            if let code = call.missedReasonCode, call.missed == true {
+                parts.append("missed-reason code \(code)")
+            }
+            if let group = call.groupJID { parts.append("group \(group)") }
+            if let creator = call.creatorJID { parts.append("started by \(creator)") }
+            if !call.participants.isEmpty {
+                parts.append("with " + call.participants.map(\.jid).joined(separator: ", "))
+            }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func locationSharing(_ sharing: LocationSharing, snapshot: SnapshotInfo) -> String {
+        var lines = header(
+            snapshot,
+            "\(sharing.outgoing.count) sharing session(s) you started, "
+                + "\(sharing.recipients.count) recipient row(s)")
+        for item in sharing.outgoing {
+            lines.append(
+                "shared in \(item.chat ?? "unknown chat") · from \(when(item.started)) · until "
+                    + "\(when(item.ends))" + (item.participant.map { " · as \($0)" } ?? ""))
+        }
+        for item in sharing.recipients {
+            lines.append(
+                "recipient \(item.jid ?? "unknown") in \(item.chat ?? "unknown chat") · expires "
+                    + when(item.expires))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func labels(_ labels: [Label], snapshot: SnapshotInfo) -> String {
+        guard !labels.isEmpty else {
+            return snapshotLine(snapshot)
+                + "\n\nNo labels. Labels exist only on accounts that use them."
+        }
+        var lines = header(snapshot, "\(labels.count) label\(labels.count == 1 ? "" : "s")")
+        for label in labels {
+            var line = "\(label.id)  \(label.name ?? "(unnamed)")"
+            if let colour = label.colorID { line += " · colour id \(colour)" }
+            if label.active == false { line += " · inactive" }
+            line += " · \(label.labeledCount) labelled"
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func labeledEntities(_ entities: [LabeledEntity], label: Label, snapshot: SnapshotInfo)
+        -> String
+    {
+        var lines = header(
+            snapshot, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
+        for entity in entities {
+            lines.append(
+                "\(entity.contactJID ?? entity.entityKey ?? "unknown")"
+                    + (entity.entityType.map { " · entity type \($0)" } ?? "")
+                    + " · \(when(entity.date))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func addressBook(_ entries: [AddressBookEntry], snapshot: SnapshotInfo) -> String {
+        guard !entries.isEmpty else { return snapshotLine(snapshot) + "\n\nNo entries found." }
+        var lines = header(snapshot, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
+        for entry in entries {
+            var parts = ["\(entry.id)  \(entry.fullName ?? entry.businessName ?? "(no name)")"]
+            if entry.fullName != nil, let business = entry.businessName { parts.append("business \(business)") }
+            if let phone = entry.phoneNumber { parts.append("phone \(phone)") }
+            if let lid = entry.lid { parts.append("lid \(lid)") }
+            if let id = entry.whatsappID { parts.append("whatsapp id \(id)") }
+            if let username = entry.username { parts.append("username \(username)") }
+            if let about = entry.about { parts.append("about: \(about)") }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func lidMatches(
+        _ matches: [LIDMatch], value: String, snapshots: [SnapshotInfo], notes: [String] = []
+    ) -> String {
+        var lines = snapshots.map(snapshotLine) + notes.map { "NOTE: \($0)" }
+        lines.append("\(matches.count) record(s) for '\(value)'")
+        lines.append("")
+        if matches.isEmpty {
+            lines.append(
+                "WhatsApp stored nothing for this value on this Mac. That is not proof that no "
+                    + "pairing exists: coverage of these tables has not been measured.")
+        }
+        for match in matches {
+            var parts = [match.source]
+            if let lid = match.lid { parts.append("lid \(lid)") }
+            if let phone = match.phoneNumber { parts.append("phone \(phone)") }
+            if let name = match.displayName { parts.append("name \(name)") }
+            if let push = match.pushName { parts.append("push name \(push)") }
+            if let username = match.username { parts.append("username \(username)") }
+            lines.append(parts.joined(separator: " · "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func channels(_ channels: [Channel], snapshot: SnapshotInfo) -> String {
+        guard !channels.isEmpty else { return snapshotLine(snapshot) + "\n\nNo channels found." }
+        var lines = header(snapshot, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
+        for channel in channels {
+            var line = "\(channel.name ?? "(unnamed)") · \(channel.jid)"
+            if let by = channel.addedByName ?? channel.addedByLID { line += " · added by \(by)" }
+            lines.append(line)
+        }
         return lines.joined(separator: "\n")
     }
 

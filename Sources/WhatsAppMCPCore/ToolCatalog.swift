@@ -6,10 +6,11 @@ import MCP
 /// Claude Desktop.
 ///
 /// One tool per thing this database holds — chats, messages, one message, groups,
-/// attachments — rather than one per query somebody happened to need. Every tool here is a
-/// read, and no tool carries a verb prefix because there is no verb to warn about: this
-/// server never writes to WhatsApp's database and never sends anything anywhere. A tool
-/// that did either would be the first, and must not be added.
+/// attachments — rather than one per query somebody happened to need. Every tool reads, and
+/// no tool carries a verb prefix because there is no verb to warn about: this server never
+/// changes WhatsApp and never sends anything anywhere. Some tools also keep a result in the
+/// server's own cache (see CLAUDE.md); a tool that changed WhatsApp or sent anything would
+/// be the first, and must not be added.
 public enum ToolCatalog {
 
     public static let statusName = "whatsapp_status"
@@ -19,9 +20,21 @@ public enum ToolCatalog {
     public static let messageGetName = "message_get"
     public static let groupGetName = "group_get"
     public static let mediaName = "media_list"
+    public static let mediaGetName = "media_get"
+    public static let mediaViewName = "media_view"
+    public static let audioTranscribeName = "audio_transcribe"
+    public static let callsName = "calls_list"
+    public static let locationSharingName = "location_sharing_list"
+    public static let labelsName = "labels_list"
+    public static let addressBookName = "address_book_list"
+    public static let lidLookupName = "lid_lookup"
+    public static let channelsName = "channels_list"
+    public static let dbTablesName = "db_tables"
+    public static let dbSchemaName = "db_schema"
+    public static let dbQueryName = "db_query"
 
     public static func all() -> [Tool] {
-        [status, chats, chatGet, search, messageGet, groupGet, media]
+        [status, chats, chatGet, search, messageGet, groupGet, media, mediaGet, mediaView, audioTranscribe, calls, locationSharing, labels, addressBook, lidLookup, channels, dbTables, dbSchema, dbQuery]
     }
 
     // MARK: Schema helpers
@@ -300,8 +313,8 @@ public enum ToolCatalog {
 
             Names are resolved the same way as elsewhere: WhatsApp's own profile name \
             first, a phone number for a plain phone address, otherwise the address \
-            unchanged — never through Apple Contacts. A LID address WhatsApp has never \
-            named for you stays a LID; this server has no phone number to offer for one.
+            unchanged — never from the system address book. A LID address WhatsApp has never \
+            named for you stays a LID here; the chat database has no phone number for one. lid_lookup may.
 
             Only works on group chats — call chats_list with kinds: ["group"] to find \
             one.
@@ -312,6 +325,294 @@ public enum ToolCatalog {
                     "Group chat id from chats_list.", minimum: 1, maximum: Int.max)
             ],
             required: ["chat_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    // MARK: Opening attachments
+
+    static let mediaGet = Tool(
+        name: mediaGetName,
+        title: "Describe an attachment file",
+        description: """
+            Facts about the file behind one attachment: its real path under WhatsApp's \
+            Message folder, MIME type, exact size, SHA-256, and the chat, sender and date \
+            of the message it belongs to. Opens the file only to hash it.
+
+            If the file is not on this Mac — WhatsApp evicts files and keeps the row — \
+            it says so rather than inventing a path. Use media_list to find a message id, \
+            and media_view to see what is in the file.
+            """,
+        inputSchema: object(
+            properties: [
+                "message_id": integer(
+                    "Message id of the attachment, from media_list or chat_get.",
+                    minimum: 1, maximum: Int.max)
+            ], required: ["message_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let mediaView = Tool(
+        name: mediaViewName,
+        title: "View an attachment",
+        description: """
+            Shows what is inside an attachment. A photo, sticker or GIF comes back as an \
+            image, reduced to at most 1568 pixels on its longest side. A PDF (or a text \
+            document) comes back as its text, capped in length; a scanned PDF has no text \
+            layer and says so. A video comes back as evenly spaced still frames, and with a \
+            'language' also as a transcript. A voice note or audio file is not played: \
+            use audio_transcribe.
+
+            The file must be under WhatsApp's Message folder on this Mac. If it was \
+            evicted, the answer says so. The file is only read; the one thing that can be \
+            written is a video's transcript, kept in this server's own cache.
+            """,
+        inputSchema: object(
+            properties: [
+                "message_id": integer(
+                    "Message id of the attachment, from media_list or chat_get.",
+                    minimum: 1, maximum: Int.max),
+                "frames": integer(
+                    "For a video: how many still frames to return.", minimum: 1, maximum: 8,
+                    default: 4),
+                "language": string(
+                    "For a video: the language spoken, a full tag such as es-ES. Without it the "
+                        + "frames come back with no transcript."),
+            ], required: ["message_id"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let audioTranscribe = Tool(
+        name: audioTranscribeName,
+        title: "Transcribe audio",
+        description: """
+            Turns a voice note, audio file or a video's sound into text, with times, using \
+            the speech recognition built into macOS. It runs entirely on this Mac: nothing \
+            is sent anywhere, and no language model is ever downloaded.
+
+            Give a 'message_id' (from media_list) or a 'path' under WhatsApp's Message \
+            folder — one of them — and the 'language' as a full tag (es-ES, en-US). macOS \
+            cannot detect the language, so it is required, and a bare "es" or "en" is \
+            refused when several regional models exist: text recognised in the wrong \
+            language or accent is fluent nonsense. Basque (eu) and Catalan (ca) were not \
+            in the engine's list when this was written; an unsupported language is \
+            refused with the list the engine offers, never replaced by another.
+
+            The result is an automatic transcription and can contain errors. Results are \
+            kept in ~/Library/Caches/whatsapp-mcp so the same audio is recognised once. \
+            WhatsApp voice notes are Ogg Opus, which needs ffmpeg installed to convert.
+            """,
+        inputSchema: object(properties: [
+            "message_id": integer(
+                "Message id of a voice note, audio file or video, from media_list.",
+                minimum: 1, maximum: Int.max),
+            "path": string("Alternatively, a file path under WhatsApp's Message folder."),
+            "language": string(
+                "Language spoken in the audio, a full BCP-47 tag such as es-ES or en-US."),
+        ], required: ["language"]),
+        annotations: .init(
+            readOnlyHint: false, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    // MARK: Beyond the chat store
+
+    private static let copyNote = """
+        Read from a private copy of the database kept in ~/Library/Caches/whatsapp-mcp; the \
+        answer says when it was taken.
+        """
+
+    static let calls = Tool(
+        name: callsName,
+        title: "List calls",
+        description: """
+            Lists voice and video calls from WhatsApp's call history: when, how long, \
+            incoming or outgoing, missed or not, video or voice, the group if it was a \
+            group call, and the participants' addresses.
+
+            The outcome is reported as the number WhatsApp stored. Which number means \
+            answered, declined or failed has not been established, and is not guessed. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "after": afterProperty,
+            "before": beforeProperty,
+            "order": orderProperty,
+            "limit": limitProperty,
+            "offset": offsetProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let locationSharing = Tool(
+        name: locationSharingName,
+        title: "List live-location sharing",
+        description: """
+            Lists live-location sharing sessions: the ones you started (chat, when, when \
+            they end) and who they were shared with. Coordinates are not included — they \
+            sit in a binary field this server does not decode. A location sent as an \
+            ordinary message is in chat_get and media_list, with its coordinates.
+
+            \(copyNote)
+            """,
+        inputSchema: object(properties: ["limit": limitProperty]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let labels = Tool(
+        name: labelsName,
+        title: "List labels",
+        description: """
+            Lists WhatsApp Business labels with their id, name, colour id and how many chats \
+            or contacts carry each. With 'label_id', lists what carries that label.
+
+            Labels exist only on accounts that use them; an empty list is normal. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "label_id": integer(
+                "Optional label id from this tool's own list. Omit to list the labels.",
+                minimum: 0, maximum: Int.max),
+            "limit": limitProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let addressBook = Tool(
+        name: addressBookName,
+        title: "Search WhatsApp's address book",
+        description: """
+            Looks up people in WhatsApp's own copy of your address book: full, given and last \
+            name, business name, phone number, LID, WhatsApp id, username and 'about' text. \
+            Matching ignores case and accents.
+
+            This is WhatsApp's own table, which can disagree with any other address book. \
+            \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "name": string("Optional text to match against names and the phone number."),
+            "limit": limitProperty,
+            "offset": offsetProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let lidLookup = Tool(
+        name: lidLookupName,
+        title: "Look up a LID or phone number",
+        description: """
+            Given a …@lid address or a phone number, returns every pairing and name WhatsApp \
+            recorded for it in its LID and extended-chat databases, each labelled with the \
+            table it came from.
+
+            No result means WhatsApp stored no pairing for that value on this Mac, not that \
+            none exists. Coverage of these tables has not been measured. \(copyNote)
+            """,
+        inputSchema: object(
+            properties: [
+                "value": string("A LID (with or without @lid) or a phone number (digits).")
+            ], required: ["value"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    static let channels = Tool(
+        name: channelsName,
+        title: "List channels",
+        description: """
+            Lists WhatsApp channels this Mac knows about: address, name, and who added \
+            it. Matching on the name ignores case and accents. \(copyNote)
+            """,
+        inputSchema: object(properties: [
+            "name": string("Optional text to match against the channel name."),
+            "limit": limitProperty,
+        ]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false)
+    )
+
+    // MARK: Raw database access
+
+    private static let databaseProperty: Value = .object([
+        "type": .string("string"),
+        "enum": .array(AllowedDatabase.allCases.map { .string($0.rawValue) }),
+        "description": .string(
+            "Which of WhatsApp's databases to read. A fixed list: the container also holds "
+                + "encryption keys that no tool here opens."),
+    ])
+
+    private static let snapshotHelp = """
+        Reads a private copy of the database made in ~/Library/Caches/whatsapp-mcp and \
+        refreshed whenever WhatsApp changes the file; the answer says when the copy was \
+        taken. Rows WhatsApp has not yet written out of its journal are not in the copy.
+        """
+
+    static let dbTables = Tool(
+        name: dbTablesName,
+        title: "List database tables",
+        description: """
+            Lists the tables and views in one of WhatsApp's local databases (chat store, \
+            contacts, call history, labels, locations, stickers, status, channels and the \
+            rest). Names only, no rows.
+
+            Use it to see what exists before db_schema and db_query. \(snapshotHelp)
+            """,
+        inputSchema: object(properties: ["db": databaseProperty], required: ["db"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    static let dbSchema = Tool(
+        name: dbSchemaName,
+        title: "Read database schema",
+        description: """
+            Returns the CREATE statements of one database, or of one table and its \
+            indexes. Structure only, no rows. The schema is WhatsApp's own and \
+            undocumented, so read it rather than assuming a column name.
+
+            \(snapshotHelp)
+            """,
+        inputSchema: object(
+            properties: [
+                "db": databaseProperty,
+                "table": string("Optional table or view name from db_tables. Omit for everything."),
+            ], required: ["db"]),
+        annotations: .init(
+            readOnlyHint: true, destructiveHint: false, idempotentHint: true,
+            openWorldHint: false)
+    )
+
+    static let dbQuery = Tool(
+        name: dbQueryName,
+        title: "Query a database",
+        description: """
+            Runs one SELECT (or WITH … SELECT) statement against one of WhatsApp's \
+            databases and returns the rows as tab-separated text, with a blob shown as its \
+            size. Anything else is refused: a second statement, ATTACH, PRAGMA, and any \
+            statement that would change data. Rows are capped and a long-running statement \
+            is stopped.
+
+            This is the escape hatch for what the dedicated tools do not cover. Prefer \
+            chats_list, chat_get and media_list for ordinary reading, and call db_schema \
+            first — column names are WhatsApp's and change between versions. \(snapshotHelp)
+            """,
+        inputSchema: object(
+            properties: [
+                "db": databaseProperty,
+                "sql": string("A single SELECT or WITH … SELECT statement."),
+                "limit": integer(
+                    "Maximum rows to return.", minimum: SnapshotDatabaseExplorer.rowLimitRange.lowerBound,
+                    maximum: SnapshotDatabaseExplorer.rowLimitRange.upperBound,
+                    default: SnapshotDatabaseExplorer.defaultRowLimit),
+            ], required: ["db", "sql"]),
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,
             openWorldHint: false)

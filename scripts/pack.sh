@@ -25,11 +25,15 @@ mkdir -p "$STAGE/server"
 cp "$BINARY" "$STAGE/server/$NAME"
 chmod +x "$STAGE/server/$NAME"
 
-# There is no TCC identity to establish here, and no embedded Info.plist to protect:
-# this server reads one file in a group container macOS does not protect, and sends no
-# Apple event to anything. The signature below is therefore about distribution, not
-# permissions — an ad-hoc signature is enough to run, and MCPB_SIGN_IDENTITY is only
-# needed for something meant to be handed to another machine.
+# There is no embedded Info.plist, and none has been needed so far: the container this
+# server reads is not TCC-protected, and audio_transcribe uses SpeechAnalyzer, which ran
+# from this bare ad-hoc binary — launched from a terminal — with no permission prompt and
+# no usage description. That has NOT been checked from the installed bundle under Claude
+# Desktop. If macOS ever demands NSSpeechRecognitionUsageDescription, embed an Info.plist
+# here with `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker <plist>`
+# and sign with a stable identity, or the grant will not survive a rebuild.
+# The signature below is otherwise about distribution: an ad-hoc signature is enough to
+# run, and MCPB_SIGN_IDENTITY is only needed for something handed to another machine.
 IDENTITY="${MCPB_SIGN_IDENTITY:--}"
 echo "==> Signing with identity: $IDENTITY"
 codesign --force --identifier "codes.eneko.$NAME" --sign "$IDENTITY" "$STAGE/server/$NAME"

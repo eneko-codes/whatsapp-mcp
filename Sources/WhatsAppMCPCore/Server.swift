@@ -4,54 +4,91 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.0.0"
+    public static let version = "1.1.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
-    /// once: that this server only reads, that the schema is undocumented, and what
-    /// WhatsApp simply does not keep on this Mac.
+    /// once: that this server never changes WhatsApp and writes only its own cache, that
+    /// the schema is undocumented, and what WhatsApp simply does not keep on this Mac.
     public static let instructions = """
-        Read-only access to WhatsApp on this Mac.
+        Read access to WhatsApp on this Mac. This server never changes WhatsApp: it cannot \
+        write to, lock or delete anything in WhatsApp's container, cannot send, and has no \
+        route to WhatsApp's network or to any other network. Unusually, no macOS permission \
+        is involved either — WhatsApp's container is not protected the way Apple's own \
+        stores are. whatsapp_status says whether the chat database is present and the shape \
+        the queries expect.
 
-        Everything comes from WhatsApp's own local database, opened read-only and \
-        immutable: this server cannot write to it, cannot lock it, and cannot disturb \
-        WhatsApp's own writes. There is no tool here that sends, edits or deletes \
-        anything, and no route to WhatsApp's network at all. Unusually, no macOS \
-        permission is involved either — WhatsApp's container is not protected the way \
-        Apple's own stores are. whatsapp_status says whether the file is present and the \
-        shape the queries expect.
+        The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private \
+        copies of WhatsApp's databases (taken read-only, refreshed when WhatsApp changes \
+        the file), saved transcripts, and a scratch file deleted after each conversion. \
+        That cache holds real message data in plaintext, owner-readable only, and stays \
+        until deleted; copies are emptied of key material as they are made.
 
-        THAT SHAPE IS NOT A CONTRACT. The database is WhatsApp's private storage, \
-        undocumented and free to change in any update. If whatsapp_status reports an \
-        unexpected shape, the reads are wrong and not merely empty — say so rather than \
-        reporting that someone has no messages.
+        THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's private \
+        storage, undocumented and free to change in any update. If a tool reports a missing \
+        table or column, the reads are wrong and not merely empty — say so rather than \
+        reporting that someone has no messages, calls or contacts.
 
-        The newest messages can be missing briefly: WhatsApp buffers writes, and \
-        whatsapp_status reports when there are unwritten changes pending.
+        The newest messages can be missing briefly: WhatsApp buffers writes in a journal \
+        this server does not read. whatsapp_status and every copy-based answer say when \
+        there were unwritten changes pending and when each copy was taken.
 
         Workflow: chats_list to see what exists, chat_get for one conversation, \
-        whatsapp_search across all of them, message_get to open one message up, \
-        media_list for what was shared rather than said, group_get for a group's roster \
-        and details. Ids are row ids in the local database — they are not WhatsApp \
-        identifiers and do not survive a reinstall, so look them up again rather than \
-        reusing one from earlier in the conversation.
+        whatsapp_search across all of them, message_get to open one message up, media_list \
+        for what was shared rather than said, group_get for a group's roster. To open an \
+        attachment: media_get for the file's facts, media_view to see a photo, read a PDF or \
+        see a video's frames, audio_transcribe for sound. Beyond messages: calls_list, \
+        location_sharing_list, labels_list, address_book_list, channels_list and \
+        lid_lookup. db_tables, db_schema and db_query read any other WhatsApp database \
+        directly — one SELECT, rows capped, call db_schema first because column names are \
+        WhatsApp's. Key material and raw protocol queues are refused. Ids are row ids in \
+        the local database — they are not WhatsApp identifiers and do not survive a \
+        reinstall, so look them up again rather than reusing one from earlier.
 
-        FOUR THINGS ARE NOT IN THIS DATABASE, and are absent from WhatsApp's own storage \
-        rather than missed by these tools: any mapping from a …@lid address to a phone \
-        number; any disappearing-message setting or TTL; the text of a message deleted for \
-        everyone, which WhatsApp clears in place with no second copy and no link to what \
-        it replaced; and any meaning for a delivery code, which is stored as a number \
-        nobody has matched to sent, delivered or read. Say so plainly rather than implying \
-        the data might be found another way.
+        TRANSCRIPTS ARE AUTOMATIC. audio_transcribe uses the speech recognition built into \
+        macOS, on this Mac, and can be wrong. It needs the language spoken, as a full tag \
+        (es-ES, en-US; a bare language only when it has a single model): macOS cannot detect it, and Basque (eu) and Catalan (ca) were not in its list when \
+        this was written — the tool says what the engine offers rather than guessing in \
+        another language. WhatsApp \
+        voice notes are Ogg Opus and need ffmpeg installed to be converted.
+
+        WHAT IS NOT IN THE CHAT DATABASE, and is absent from WhatsApp's own storage rather \
+        than missed by these tools: a mapping from a …@lid address to a phone number there \
+        (other databases have pairing tables, which lid_lookup reads, and whose coverage is \
+        not measured); any disappearing-message setting or TTL; the text of a message \
+        deleted for everyone, which WhatsApp clears in place with no second copy and no link \
+        to what it replaced; and any meaning for a delivery code, which is stored as a \
+        number nobody has matched to sent, delivered or read. Say so plainly rather than \
+        implying the data might be found another way.
+
+        WhatsApp status updates are not covered: the structure of that database could not \
+        be verified, so there is no tool for them. db_query can reach it.
         """
 
     /// The store is a parameter so the whole server can be driven by a double. Nothing in
     /// this function opens a database by itself.
     public static func run(
         store: (any WhatsAppStore)? = nil,
+        explorer: (any DatabaseExplorer)? = nil,
+        reader: (any DomainReader)? = nil,
+        transcription: TranscriptionService? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
+        let cache = SnapshotCache(
+            containerDirectory: configuration.containerDirectory,
+            cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))
+        let mediaFiles = MediaFiles(containerDirectory: configuration.containerDirectory)
         let tools = WhatsAppTools(
-            store: store ?? SystemWhatsAppStore(path: configuration.databasePath))
+            store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
+            explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
+            reader: reader ?? SnapshotDomainReader(cache: cache),
+            mediaFiles: mediaFiles,
+            transcription: transcription
+                ?? TranscriptionService(
+                    mediaFiles: mediaFiles,
+                    cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory),
+                    converter: (configuration.ffmpegPath.map { URL(fileURLWithPath: $0) }
+                        ?? FFmpegConverter.locate()).map { FFmpegConverter(executable: $0) },
+                    engine: NativeSpeechTranscriber()))
         let server = Server(
             name: name,
             version: version,

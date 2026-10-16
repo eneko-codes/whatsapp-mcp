@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "whatsapp-mcp",
   "display_name": "WhatsApp",
-  "version": "1.0.0",
-  "description": "Search and read WhatsApp history on this Mac. Read-only: it cannot send, edit or delete anything",
-  "long_description": "A local MCP server written in Swift that reads WhatsApp on this Mac.\n\nEverything comes from WhatsApp's own local database, opened read-only and immutable. Unusually, no macOS permission is involved at all: WhatsApp's container is not protected the way Apple's own stores are.\n\nThat database is WhatsApp's private storage. It is undocumented and free to change in any update, so this server checks its shape first and says plainly when it no longer matches — a schema change must not read as “you have no messages”.\n\nRead-only by construction. There is no tool here that sends, edits or deletes anything, no shortcut, and no route to WhatsApp's network — the send path was removed from this server outright rather than left switched off.\n\nPlug and play: there is nothing to configure.\n\nNot affiliated with, endorsed by, or connected to WhatsApp or Meta.",
+  "version": "1.1.0",
+  "description": "Read WhatsApp on this Mac: chats, messages, calls, labels, the address book, and the files behind attachments — photos, PDFs, video frames, and voice notes transcribed on-device. It never changes WhatsApp and cannot send anything",
+  "long_description": "A local MCP server written in Swift that reads WhatsApp on this Mac.\n\nEverything comes from WhatsApp's own local databases, opened read-only and immutable, and from the media files under WhatsApp's Message folder. Unusually, no macOS permission is involved in reading them: WhatsApp's container is not protected the way Apple's own stores are.\n\nBeyond messages it reads calls, live-location sessions, labels, WhatsApp's address book, channels and LID pairings; opens attachments (a photo as an image, a PDF as text, a video as frames); transcribes voice notes with the speech recognition built into macOS, entirely on this Mac; and offers one read-only SELECT over any allow-listed WhatsApp database. Key material and raw protocol queues are refused.\n\nRead-only toward WhatsApp. There is no tool that sends, edits or deletes anything, no shortcut, and no route to any network — no model is ever downloaded.\n\nThe one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private copies of WhatsApp's databases, saved transcripts, and a scratch file deleted after each conversion. That cache holds real message data in plaintext, readable only by you, until you delete it.\n\nTranscription needs macOS 26 or later, the language's speech model installed, and ffmpeg (brew install ffmpeg) for WhatsApp's Ogg Opus voice notes. macOS does not offer Basque or Catalan for this engine; the tool says so instead of guessing. Transcripts are automatic and can be wrong.\n\nWhatsApp's data is private, undocumented storage that can change in any update, so this server checks its shape first and says plainly when it no longer matches — a schema change must not read as \"you have no messages\". Status updates are not covered.\n\nNot affiliated with, endorsed by, or connected to WhatsApp or Meta.",
   "author": {
     "name": "eneko-codes",
     "url": "https://github.com/eneko-codes"
@@ -20,6 +20,7 @@
     "whatsapp",
     "messages",
     "chat",
+    "transcription",
     "macos"
   ],
   "server": {
@@ -59,6 +60,54 @@
     {
       "name": "group_get",
       "description": "What this server can read about a group: when it was created and by whom, when its name last changed, and every member row with its address, resolved name and admin flag."
+    },
+    {
+      "name": "media_get",
+      "description": "Facts about the file behind one attachment: its real path, MIME type, exact size, SHA-256, and the chat, sender and date. Says plainly when the file is not on this Mac."
+    },
+    {
+      "name": "media_view",
+      "description": "Shows what is inside an attachment: a photo or sticker as an image, a PDF or text document as text, a video as still frames. Audio is transcribed with audio_transcribe."
+    },
+    {
+      "name": "audio_transcribe",
+      "description": "Turns a voice note, audio file or a video's sound into text with times, using the speech recognition built into macOS, entirely on this Mac. Needs ffmpeg for WhatsApp's Ogg Opus voice notes. Basque and Catalan are not supported."
+    },
+    {
+      "name": "calls_list",
+      "description": "Lists voice and video calls from WhatsApp's call history: when, how long, direction, missed or not, video or voice, group and participants. The outcome is the stored number, not a guessed meaning."
+    },
+    {
+      "name": "location_sharing_list",
+      "description": "Lists live-location sharing sessions you started and who they were shared with. Coordinates are not decoded."
+    },
+    {
+      "name": "labels_list",
+      "description": "Lists WhatsApp Business labels and how many chats carry each; with a label id, lists what carries it."
+    },
+    {
+      "name": "address_book_list",
+      "description": "Looks up people in WhatsApp's own copy of your address book: names, business name, phone number, LID, username and about text."
+    },
+    {
+      "name": "lid_lookup",
+      "description": "Given a LID or phone number, returns every pairing and name WhatsApp recorded for it, each labelled with the table it came from."
+    },
+    {
+      "name": "channels_list",
+      "description": "Lists WhatsApp channels this Mac knows about: address, name and who added it."
+    },
+    {
+      "name": "db_tables",
+      "description": "Lists the tables and views in one of WhatsApp's local databases (chat store, contacts, call history, labels, locations, stickers, status, channels and the rest). Names only, no rows."
+    },
+    {
+      "name": "db_schema",
+      "description": "Returns the CREATE statements of one WhatsApp database, or of one table and its indexes. Structure only, no rows."
+    },
+    {
+      "name": "db_query",
+      "description": "Runs one SELECT statement against one of WhatsApp's databases and returns the rows. Anything that is not a single read-only SELECT is refused; rows are capped and long statements are stopped."
     }
   ],
   "compatibility": {

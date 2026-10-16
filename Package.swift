@@ -15,9 +15,9 @@ let package = Package(
         // store needs a database driver, and adding a package for it would mean auditing
         // a dependency to do what `import SQLite3` does in one line.
         //
-        // No Objective-C target and no embedded Info.plist: both existed only for the
-        // Apple event that drove the Shortcuts send path. This server reads a file and
-        // does nothing else, so it needs no TCC identity at all.
+        // No Objective-C target and no embedded Info.plist: nothing here sends an Apple
+        // event, and the speech engine has run without a usage description so far (see
+        // scripts/pack.sh for what to do if macOS ever demands one).
         .target(
             name: "WhatsAppMCPCore",
             dependencies: [.product(name: "MCP", package: "swift-sdk")]
