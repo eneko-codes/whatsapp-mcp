@@ -572,3 +572,72 @@ struct DatabaseQueryTests {
         #expect(injected.contains("No such table"))
     }
 }
+
+@Suite("Cached copies heal themselves")
+struct SelfHealingCopyTests {
+
+    @Test("A copy overwritten with garbage under a valid stamp is made again, not reported")
+    func corruptCopyIsRemade() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.make(.contacts)
+        let tools = fake.tools()
+
+        let (first, firstError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("ContactsV2")])
+        #expect(!firstError, Comment(rawValue: first))
+
+        // Another instance, a crash or a full disk leaves this behind; the stamp still matches.
+        let copy = fake.cache.appendingPathComponent("ContactsV2.sqlite")
+        try Data(repeating: 0x42, count: 8192).write(to: copy)
+
+        let (healed, healedError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("ContactsV2")])
+        #expect(!healedError, Comment(rawValue: healed))
+        #expect(healed.contains("ZINVENTED"))
+        // And the rebuilt copy really is a database again.
+        let rows = try fake.explorer().select("SELECT count(*) FROM ZINVENTED", in: .contacts, limit: 1)
+        #expect(rows.rows == [["2"]])
+    }
+
+    @Test("A truncated copy and a missing file under a valid stamp heal the same way")
+    func truncatedAndMissingCopiesAreRemade() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.make(.labels)
+        let tools = fake.tools()
+        _ = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
+        let copy = fake.cache.appendingPathComponent("Labels.sqlite")
+
+        try Data().write(to: copy)  // truncated to nothing
+        let (truncated, truncatedError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
+        #expect(!truncatedError, Comment(rawValue: truncated))
+
+        try FileManager.default.removeItem(at: copy)
+        let (missing, missingError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
+        #expect(!missingError, Comment(rawValue: missing))
+    }
+
+    @Test("A healthy copy is not made again just because it was read")
+    func healthyCopyIsReused() throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try fake.make(.sticker)
+        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
+        let first = try cache.openReadable(.sticker).info
+        let second = try cache.openReadable(.sticker).info
+        #expect(abs(first.copiedAt.timeIntervalSince(second.copiedAt)) < 0.001)
+    }
+
+    @Test("When the source itself is garbage the failure is reported, with what was tried")
+    func damagedSourceIsReported() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try FileManager.default.createDirectory(
+            at: fake.sourceURL(.location).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 0x42, count: 8192).write(to: fake.sourceURL(.location))
+        let (text, isError) = await call(fake.tools(), ToolCatalog.dbTablesName, ["db": .string("Location")])
+        #expect(isError)
+        #expect(text.contains("Location"))
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: fake.cache.path)) ?? []
+        #expect(!leftovers.contains { $0.contains(".tmp-") }, "\(leftovers)")
+    }
+}

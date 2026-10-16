@@ -139,7 +139,9 @@ public struct SnapshotCache: Sendable {
     }
 
     /// The copy of `database`, taken now if there is none or the source has changed.
-    public func snapshot(of database: AllowedDatabase) throws -> (url: URL, info: SnapshotInfo) {
+    public func snapshot(of database: AllowedDatabase, forceRefresh: Bool = false) throws -> (
+        url: URL, info: SnapshotInfo
+    ) {
         let source = containerDirectory.appendingPathComponent(database.relativePath)
         switch FileAccess.probe(source.path) {
         case .missing: throw SnapshotError.sourceMissing(database)
@@ -149,7 +151,7 @@ public struct SnapshotCache: Sendable {
         let copy = cacheDirectory.appendingPathComponent(database.cacheFileName)
         let current = Self.stamp(of: source)
 
-        if FileManager.default.fileExists(atPath: copy.path),
+        if !forceRefresh, FileManager.default.fileExists(atPath: copy.path),
             let recorded = readRecord(for: database), recorded.stamp == current,
             recorded.scrubVersion == Self.scrubVersion
         {
@@ -162,6 +164,46 @@ public struct SnapshotCache: Sendable {
             scrubVersion: Self.scrubVersion)
         try writeRecord(record, for: database)
         return (copy, info(record, database: database, stale: false))
+    }
+
+    /// The cached copy, opened and proven readable.
+    ///
+    /// A copy can be unreadable while its stamp still says it is current: it was replaced by
+    /// another instance between this call finding it and opening it, or truncated, or half
+    /// written by a process that was killed. Reporting that would be wrong — the source is
+    /// fine — and so would trusting the stamp. One cheap read decides; if the copy is damaged
+    /// it is made again, once, and only a second failure is an error.
+    func openReadable(_ database: AllowedDatabase) throws -> (
+        database: ReadOnlyDatabase, info: SnapshotInfo
+    ) {
+        func attempt(forceRefresh: Bool) throws -> (ReadOnlyDatabase, SnapshotInfo) {
+            let (url, info) = try snapshot(of: database, forceRefresh: forceRefresh)
+            let connection = try ReadOnlyDatabase(path: url.path)
+            _ = try connection.tableNames()
+            return (connection, info)
+        }
+        do {
+            return try attempt(forceRefresh: false)
+        } catch let failure as ReadOnlyDatabase.OpenFailure where failure.isDamaged {
+            return try retry(database, attempt)
+        } catch let failure as ReadOnlyDatabase.QueryFailure where failure.isDamaged {
+            return try retry(database, attempt)
+        } catch let failure as ReadOnlyDatabase.OpenFailure {
+            throw SnapshotError.copyFailed(database, "the cached copy could not be opened: \(failure.detail)")
+        }
+    }
+
+    private func retry(
+        _ database: AllowedDatabase,
+        _ attempt: (Bool) throws -> (ReadOnlyDatabase, SnapshotInfo)
+    ) throws -> (ReadOnlyDatabase, SnapshotInfo) {
+        do {
+            return try attempt(true)
+        } catch let failure as ReadOnlyDatabase.OpenFailure {
+            throw SnapshotError.copyFailed(database, "the copy is unreadable even after it was made again: \(failure.detail)")
+        } catch let failure as ReadOnlyDatabase.QueryFailure {
+            throw SnapshotError.copyFailed(database, "the copy is unreadable even after it was made again: \(failure.detail)")
+        }
     }
 
     /// What is cached right now, without copying anything. Databases never copied are

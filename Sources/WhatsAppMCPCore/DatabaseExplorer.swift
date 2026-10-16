@@ -39,9 +39,9 @@ public struct SnapshotDatabaseExplorer: DatabaseExplorer {
     public func tables(in database: AllowedDatabase) throws -> (
         entries: [TableEntry], snapshot: SnapshotInfo
     ) {
-        let (url, info) = try cache.snapshot(of: database)
+        let (connection, info) = try cache.openReadable(database)
         var entries: [TableEntry] = []
-        try open(url).query(
+        try connection.query(
             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name"
         ) { row in
             entries.append(TableEntry(name: row.text(0) ?? "", kind: row.text(1) ?? ""))
@@ -52,10 +52,10 @@ public struct SnapshotDatabaseExplorer: DatabaseExplorer {
     public func schema(of database: AllowedDatabase, table: String?) throws -> (
         statements: [String], snapshot: SnapshotInfo
     ) {
-        let (url, info) = try cache.snapshot(of: database)
+        let (connection, info) = try cache.openReadable(database)
         var statements: [String] = []
         // The table name is bound, never interpolated: it comes from the caller.
-        try open(url).query(
+        try connection.query(
             """
             SELECT sql FROM sqlite_master
             WHERE sql IS NOT NULL AND (?1 IS NULL OR tbl_name = ?1 COLLATE NOCASE)
@@ -71,20 +71,12 @@ public struct SnapshotDatabaseExplorer: DatabaseExplorer {
     public func select(_ sql: String, in database: AllowedDatabase, limit: Int) throws
         -> QueryResult
     {
-        let (url, info) = try cache.snapshot(of: database)
-        let selected = try open(url).selectRows(sql, maxRows: limit)
+        let (connection, info) = try cache.openReadable(database)
+        let selected = try connection.selectRows(sql, maxRows: limit)
         return QueryResult(
             columns: selected.columns, rows: selected.rows, truncated: selected.truncated,
             snapshot: info)
     }
 
     public func existingSnapshots() -> [SnapshotInfo] { cache.existingSnapshots() }
-
-    private func open(_ url: URL) throws -> ReadOnlyDatabase {
-        do {
-            return try ReadOnlyDatabase(path: url.path)
-        } catch let failure as ReadOnlyDatabase.OpenFailure {
-            throw ToolError.storeFailure(failure.detail)
-        }
-    }
 }

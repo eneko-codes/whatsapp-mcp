@@ -33,6 +33,8 @@ final class ReadOnlyDatabase {
         /// macOS refusing the open — a privacy grant that is missing — as opposed to a file
         /// that is absent or damaged. Apple's SQLite reports it as `SQLITE_AUTH` ("authorization
         /// denied") rather than `CANTOPEN`, so the code is checked as well as `errno`.
+        var isDamaged: Bool { ReadOnlyDatabase.isDamageCode(code) && !isPermissionDenied }
+
         var isPermissionDenied: Bool {
             [EPERM, EACCES].contains(systemErrno) || code == SQLITE_AUTH || code == SQLITE_PERM
                 || (code & 0xFF) == SQLITE_AUTH || (code & 0xFF) == SQLITE_PERM
@@ -42,6 +44,16 @@ final class ReadOnlyDatabase {
     struct QueryFailure: Error {
         let sql: String
         let detail: String
+        var code: Int32 = SQLITE_ERROR
+
+        var isDamaged: Bool { ReadOnlyDatabase.isDamageCode(code) }
+    }
+
+    /// I/O error, corruption, "not a database", cannot open: what a cached copy that was
+    /// replaced under a reader, or truncated, or half-written reports. A file in that state
+    /// is made again rather than reported, because the source it came from is fine.
+    static func isDamageCode(_ code: Int32) -> Bool {
+        [SQLITE_IOERR, SQLITE_CORRUPT, SQLITE_NOTADB, SQLITE_CANTOPEN].contains(code & 0xFF)
     }
 
     /// `file:` URI with the path percent-encoded, because the query string after `?` is
@@ -125,7 +137,7 @@ final class ReadOnlyDatabase {
         else {
             let detail = String(cString: sqlite3_errmsg(handle))
             sqlite3_finalize(statement)
-            throw QueryFailure(sql: sql, detail: detail)
+            throw QueryFailure(sql: sql, detail: detail, code: sqlite3_extended_errcode(handle))
         }
         defer { sqlite3_finalize(statement) }
 
@@ -140,7 +152,9 @@ final class ReadOnlyDatabase {
             case SQLITE_DONE:
                 return
             default:
-                throw QueryFailure(sql: sql, detail: String(cString: sqlite3_errmsg(handle)))
+                throw QueryFailure(
+                    sql: sql, detail: String(cString: sqlite3_errmsg(handle)),
+                    code: sqlite3_extended_errcode(handle))
             }
         }
     }

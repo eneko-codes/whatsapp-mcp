@@ -141,13 +141,7 @@ public struct SnapshotDomainReader: DomainReader {
     private func open(_ database: AllowedDatabase, requires needs: [String: [String]]) throws
         -> (ReadOnlyDatabase, SnapshotInfo)
     {
-        let (url, info) = try cache.snapshot(of: database)
-        let connection: ReadOnlyDatabase
-        do {
-            connection = try ReadOnlyDatabase(path: url.path)
-        } catch let failure as ReadOnlyDatabase.OpenFailure {
-            throw ToolError.storeFailure(failure.detail)
-        }
+        let (connection, info) = try cache.openReadable(database)
         var missing: [String] = []
         for (table, columns) in needs.sorted(by: { $0.key < $1.key }) {
             let present = try connection.columnNames(of: table)
