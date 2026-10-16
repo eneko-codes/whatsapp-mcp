@@ -30,15 +30,18 @@ mkdir -p "$STAGE/server"
 cp "$BINARY" "$STAGE/server/$NAME"
 chmod +x "$STAGE/server/$NAME"
 
-# There is no embedded Info.plist, and none has been needed so far: the container this
-# server reads is not TCC-protected, and audio_transcribe uses SpeechAnalyzer, which ran
-# from this bare ad-hoc binary — launched from a terminal — with no permission prompt and
-# no usage description. That has NOT been checked from the installed bundle under Claude
-# Desktop. If macOS ever demands NSSpeechRecognitionUsageDescription, embed an Info.plist
-# here with `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker <plist>`
-# and sign with a stable identity, or the grant will not survive a rebuild.
-# The signature below is otherwise about distribution: an ad-hoc signature is enough to
-# run, and MCPB_SIGN_IDENTITY is only needed for something handed to another machine.
+# There is no embedded Info.plist, and none has been needed so far: audio_transcribe uses
+# SpeechAnalyzer, which ran from this bare ad-hoc binary launched from a terminal with no
+# permission prompt and no usage description (not checked on a clean install under Claude
+# Desktop). If macOS ever demands NSSpeechRecognitionUsageDescription, embed an Info.plist
+# here with `-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker <plist>`.
+#
+# The signature matters for something else: Full Disk Access, which reading WhatsApp's
+# container needs, is granted to the exact program. An ad-hoc signature (the default) has
+# a different identity on every build, so macOS forgets the grant after each rebuild and
+# the person must grant it again — the README says so. A stable identity would keep it,
+# BUT a certificate's subject carries its holder's name: never publish a binary signed
+# with a personal certificate. MCPB_SIGN_IDENTITY is for local use or a pseudonymous one.
 IDENTITY="${MCPB_SIGN_IDENTITY:--}"
 echo "==> Signing with identity: $IDENTITY"
 codesign --force --identifier "codes.eneko.$NAME" --sign "$IDENTITY" "$STAGE/server/$NAME"

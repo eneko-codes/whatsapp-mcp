@@ -468,6 +468,51 @@ struct FixtureDatabaseTests {
         #expect(message.sender?.displayName == "Grace Hopper")
     }
 
+    @Test("A second profile-name row for one sender does not repeat that sender's messages")
+    func duplicateProfileNameRowsDoNotDuplicateMessages() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+        let before = try await store.messages(matching: MessageQuery(chatID: 3))
+
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK)
+        try execute(
+            try #require(handle),
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (3, '333@lid', 'Grace Newer Name')")
+        sqlite3_close(handle)
+
+        let after = try await store.messages(matching: MessageQuery(chatID: 3))
+        #expect(after.rows.map(\.id) == before.rows.map(\.id), "messages were repeated or lost")
+        #expect(after.total == before.total)
+        #expect(Set(after.rows.map(\.id)).count == after.rows.count)
+
+        // Every tool agrees on one name: the newest row.
+        let message = try #require(after.rows.first { $0.id == 30 })
+        #expect(message.sender?.displayName == "Grace Newer Name")
+        let chats = try await store.chats(matching: ChatQuery(kinds: [.group], includeArchived: true, includeHidden: true))
+        let group = try #require(chats.first { $0.id == 3 })
+        #expect(group.messageCount == before.total, "chats_list and chat_get disagree")
+    }
+
+    @Test("A newer profile-name row with no name does not blank a sender who has an older one")
+    func emptyNewestProfileNameFallsBackToTheOlderOne() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK)
+        try execute(
+            try #require(handle),
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (3, '333@lid', ''), (4, '333@lid', NULL)")
+        sqlite3_close(handle)
+
+        let page = try await store.messages(matching: MessageQuery(chatID: 3))
+        let message = try #require(page.rows.first { $0.id == 30 })
+        #expect(message.sender?.displayName == "Grace Hopper")
+    }
+
     @Test("An empty member name is treated as absent, never shown as a blank sender")
     func emptyMemberNameIsNotABlankSender() async throws {
         let fixture = try makeFixture()
@@ -712,6 +757,24 @@ struct FixtureDatabaseTests {
         #expect(message.mentions.count == 1)
         #expect(message.mentions.first?.name == "Ane")
         #expect(message.mentions.first?.jid == "99020605243425@lid")
+    }
+
+    @Test("When a LID has two profile-name rows the newest names it, in mentions too")
+    func mentionUsesTheNewestProfileName() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK)
+        try execute(
+            try #require(handle),
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (5, '99020605243425@lid', 'Ane Newer')")
+        sqlite3_close(handle)
+
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+        let page = try await store.messages(matching: MessageQuery(chatID: 3))
+        let message = try #require(page.rows.first { $0.id == 50 })
+        #expect(message.mentions.first?.name == "Ane Newer")
+        #expect(message.text == "ping @Ane Newer (99020605243425) are you free?")
     }
 
     @Test("A mention naming an unknown LID is left as written and still listed")

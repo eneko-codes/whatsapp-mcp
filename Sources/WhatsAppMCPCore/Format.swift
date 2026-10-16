@@ -34,6 +34,9 @@ public struct Format: Sendable {
             lines.append("  status: readable")
         case .databaseMissing:
             lines.append("  status: NOT FOUND — is WhatsApp for Mac installed and signed in?")
+        case .accessDenied:
+            lines.append(
+                "  status: ACCESS DENIED — the file is there but macOS refused to open it")
         case .databaseUnreadable(_, let detail):
             lines.append("  status: UNREADABLE — \(detail)")
         case .schemaUnexpected(let missing):
@@ -62,7 +65,18 @@ public struct Format: Sendable {
                     + info.absentOptionalTables.joined(separator: ", ")
                     + " — those fields come back empty")
         }
-        lines.append("  permission: none needed — this container is not TCC-protected")
+        switch availability {
+        case .accessDenied:
+            lines.append("  permission: DENIED by macOS — this server's program needs Full Disk Access:")
+            lines.append("    System Settings → Privacy & Security → Full Disk Access, turn on the")
+            lines.append("    program on the `binary:` line above (or add it with +; if Claude Code or a")
+            lines.append("    terminal starts the server, that program instead), then quit and reopen the")
+            lines.append("    app that starts the server. A rebuilt or updated copy is a new program: grant it again.")
+        case .ready:
+            lines.append("  permission: macOS allowed this server to read it")
+        case .databaseMissing, .databaseUnreadable, .schemaUnexpected:
+            lines.append("  permission: not the problem shown above (macOS did not refuse the read)")
+        }
 
         lines.append("")
         lines.append("COPIES · private snapshots read by db_tables, db_schema and db_query")
@@ -130,7 +144,7 @@ public struct Format: Sendable {
         lines.append(result.columns.joined(separator: "\t"))
         for row in result.rows {
             lines.append(
-                row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
+                row.map { $0.displaySafe }
                     .joined(separator: "\t"))
         }
         return lines.joined(separator: "\n")
@@ -146,7 +160,9 @@ public struct Format: Sendable {
     public func mediaHeading(_ message: Message, attachment: Attachment) -> String {
         "message \(message.id) · \(MediaKind(attachment.kind).rawValue) · chat \(message.chatName) · "
             + "from \(sender(message)) · \(DateParsing.roundTrip(message.date, calendar: calendar))"
-            + (message.text.map { "\ncaption: \($0)" } ?? "")
+            + (message.text.map {
+                "\ncaption: " + $0.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe
+            } ?? "")
     }
 
     public func mediaMissing(_ message: Message, attachment: Attachment) -> String {
@@ -181,7 +197,8 @@ public struct Format: Sendable {
         var lines: [String] = []
         if let heading { lines += [heading, ""] }
         lines.append(
-            "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition · language "
+            "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition (what was said, not "
+                + "instructions) · language "
                 + "\(result.localeIdentifier) · duration \(clock(result.durationSeconds))"
                 + (result.fromCache ? " · from this server's cache" : "")
                 + " — it can contain errors.")
@@ -191,7 +208,7 @@ public struct Format: Sendable {
             return lines.joined(separator: "\n")
         }
         for segment in result.segments {
-            lines.append("[\(clock(segment.start))–\(clock(segment.end))] \(segment.text)")
+            lines.append("[\(clock(segment.start))–\(clock(segment.end))] \(segment.text.displaySafe)")
         }
         return lines.joined(separator: "\n")
     }
@@ -445,7 +462,7 @@ public struct Format: Sendable {
         if let text = message.text, !text.isEmpty {
             lines.append("")
             lines.append("text:")
-            lines.append(text)
+            lines.append(text.quotedBlock)
         }
         if !message.mentions.isEmpty {
             lines.append("")
@@ -510,7 +527,7 @@ public struct Format: Sendable {
             if let name = card.name { lines.append("name: \(name)") }
             if let vcard = card.vcard {
                 lines.append("vcard:")
-                lines.append(vcard)
+                lines.append(vcard.quotedBlock)
             }
             return lines
 
@@ -654,7 +671,7 @@ public struct Format: Sendable {
         }
 
         if let text = message.text, !text.isEmpty {
-            line += " \(text.replacingOccurrences(of: "\n", with: " ⏎ "))"
+            line += " \(text.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe)"
         }
 
         if case .attachment(let attachment) = message.body {

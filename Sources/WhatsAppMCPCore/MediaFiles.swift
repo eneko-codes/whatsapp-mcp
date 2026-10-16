@@ -48,6 +48,7 @@ public struct MediaFiles: Sendable {
 
     /// Size and SHA-256, hashed in chunks so a large video is never held in memory.
     public static func facts(of url: URL) throws -> FileFacts {
+        try requireReadable(url)
         guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
             throw ViewError.unreadable("not a regular file")
         }
@@ -74,6 +75,8 @@ public struct MediaFiles: Sendable {
 
     public enum ViewError: Error, Equatable {
         case unreadable(String)
+        /// macOS refused to open the file; carries the path.
+        case accessDenied(String)
         case tooLarge(Int64, limit: Int64)
         case tooManyPixels(Int, limit: Int)
         case locked
@@ -85,7 +88,14 @@ public struct MediaFiles: Sendable {
 
     /// A regular file no larger than the limit. Fails closed: a file whose size cannot be
     /// read, or that is not a regular file (a FIFO would block a read forever), is refused.
+    /// Every parser below would report a file macOS refused to open as "not an image" or
+    /// "not a PDF", which sends the reader looking at the file instead of at the permission.
+    static func requireReadable(_ url: URL) throws {
+        if FileAccess.probe(url.path) == .denied { throw ViewError.accessDenied(url.path) }
+    }
+
     private static func requireSize(_ url: URL) throws {
+        try requireReadable(url)
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
             values.isRegularFile == true, let size = values.fileSize
         else { throw ViewError.unreadable("not a regular file") }

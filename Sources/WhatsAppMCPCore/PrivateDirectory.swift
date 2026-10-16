@@ -24,3 +24,29 @@ enum PrivateDirectory {
         }
     }
 }
+
+enum PrivateFile {
+    /// Writes `data` to `url` so that the file is `0600` from its first byte and appears
+    /// whole or not at all. `Data.write(options: .atomic)` creates its temporary under the
+    /// umask and the mode is only set afterwards, which leaves a window — covered by the
+    /// directory's `0700` where this server made it, and not at all where the cache
+    /// directory already existed with looser permissions.
+    static func write(_ data: Data, to url: URL) throws {
+        let fileManager = FileManager.default
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        guard fileManager.createFile(
+            atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600])
+        else { throw CocoaError(.fileWriteUnknown) }
+        do {
+            if fileManager.fileExists(atPath: url.path) {
+                _ = try fileManager.replaceItemAt(url, withItemAt: temporary)
+            } else {
+                try fileManager.moveItem(at: temporary, to: url)
+            }
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
+    }
+}

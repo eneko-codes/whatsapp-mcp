@@ -4,7 +4,7 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.1.0"
+    public static let version = "1.1.1"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and writes only its own cache, that
@@ -12,14 +12,17 @@ public enum WhatsAppMCPServer {
     public static let instructions = """
         Read access to WhatsApp on this Mac. This server never changes WhatsApp: it cannot \
         write to, lock or delete anything in WhatsApp's container, cannot send, and has no \
-        route to WhatsApp's network or to any other network. Unusually, no macOS permission \
-        is involved either — WhatsApp's container is not protected the way Apple's own \
-        stores are. whatsapp_status says whether the chat database is present and the shape \
-        the queries expect.
+        route to WhatsApp's network or to any other network. On recent macOS, reading \
+        WhatsApp's container needs Full Disk Access for this server's program, and every \
+        rebuilt or updated copy needs it again. whatsapp_status says whether macOS allowed \
+        the read (and, if it refused, the exact steps), whether the chat database is \
+        present, and the shape the queries expect. If a tool says macOS refused access to \
+        WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
+        steps; it is not a missing file.
 
         The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private \
         copies of WhatsApp's databases (taken read-only, refreshed when WhatsApp changes \
-        the file), saved transcripts, and a scratch file deleted after each conversion. \
+        the file), saved transcripts, and a scratch directory deleted after each conversion. \
         That cache holds real message data in plaintext, owner-readable only, and stays \
         until deleted; copies are emptied of key material as they are made.
 
@@ -48,8 +51,10 @@ public enum WhatsAppMCPServer {
         macOS, on this Mac, and can be wrong. It needs the language spoken, as a full tag \
         (es-ES, en-US; a bare language only when it has a single model): macOS cannot detect it, and Basque (eu) and Catalan (ca) were not in its list when \
         this was written — the tool says what the engine offers rather than guessing in \
-        another language. WhatsApp \
-        voice notes are Ogg Opus and need ffmpeg installed to be converted.
+        another language. macOS 27 opens \
+        WhatsApp's Ogg Opus voice notes, MP3 and M4A itself; a video's sound track, containers \
+        it cannot open (Matroska, for one) and, on older macOS, possibly voice notes need \
+        ffmpeg installed.
 
         WHAT IS NOT IN THE CHAT DATABASE, and is absent from WhatsApp's own storage rather \
         than missed by these tools: a mapping from a …@lid address to a phone number there \
@@ -104,7 +109,11 @@ public enum WhatsAppMCPServer {
         // The default StdioTransport logger is a no-op handler. Leave it that way: a
         // logger writing to stdout would interleave with the JSON-RPC stream and break
         // every response after the first log line.
+        ProcessCleanup.shared.installSignalHandlers()
         try await server.start(transport: StdioTransport())
         await server.waitUntilCompleted()
+        // The client closed stdin. Work still in flight dies with the process, and its
+        // temporary files and ffmpeg would outlive it.
+        ProcessCleanup.shared.run()
     }
 }

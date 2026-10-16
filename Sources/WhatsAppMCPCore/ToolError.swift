@@ -10,6 +10,8 @@ public enum ToolError: Error, Equatable {
     case messageNotFound(id: Int64)
     case notAGroup(id: Int64, kind: ChatKind)
     case storeFailure(String)
+    /// macOS refused to open a file under WhatsApp's container; carries the path.
+    case accessDenied(String)
     case databaseNotAllowed(String)
     case queryRefused(String)
     case explorerUnavailable
@@ -69,6 +71,9 @@ public enum ToolError: Error, Equatable {
         case .storeFailure(let detail):
             return "WhatsApp's database returned an error: \(detail)"
 
+        case .accessDenied(let path):
+            return Self.accessDeniedMessage(path)
+
         case .databaseNotAllowed(let name):
             return """
                 '\(name)' is not a database this server reads.
@@ -98,6 +103,31 @@ public enum ToolError: Error, Equatable {
         }
     }
 
+    /// The fix for a refusal, in the order a person does it. The part about updates is not
+    /// decoration: macOS ties the grant to the exact program, so every new build of this
+    /// server is a program the old grant does not cover.
+    static func accessDeniedMessage(_ path: String) -> String {
+        """
+        macOS refused access to WhatsApp's data folder:
+          \(path)
+
+        The file is there. On recent macOS versions another app's data needs Full Disk
+        Access for the program that runs this server.
+
+        To fix it:
+          1. Open System Settings → Privacy & Security → Full Disk Access.
+          2. Turn on (or add with +) the program that runs this server. Claude Desktop runs
+             it through its own helper, so look for "whatsapp-mcp"; the exact path is on
+             the `binary:` line of whatsapp_status. If something else starts it — Claude
+             Code (its `claude` program) or a terminal — it is that program instead.
+          3. Quit the app that starts the server (Claude Desktop, or the one in step 2)
+             completely and open it again.
+
+        Each rebuilt or updated copy of this server is a new program to macOS: the grant
+        given to the old one does not carry over, so repeat this after every update.
+        """
+    }
+
     static func availabilityMessage(_ availability: StoreAvailability) -> String {
         switch availability {
         case .ready:
@@ -108,14 +138,14 @@ public enum ToolError: Error, Equatable {
                 WhatsApp's chat database is not at:
                   \(path)
 
-                Nothing is denied — the file simply is not there. That happens when the
-                Mac app has never been installed, or has never finished linking to a
-                phone, or was removed. Open WhatsApp once and let it sync, then try again.
-
-                This is not a permissions problem: the group container this server reads
-                is not protected by macOS privacy controls, so there is no switch to
-                enable anywhere.
+                macOS reports that nothing exists at that path — this is not a refusal. That
+                happens when the Mac app has never been installed, or has never finished
+                linking to a phone, or was removed. Open WhatsApp once and let it sync,
+                then try again.
                 """
+
+        case .accessDenied(let path):
+            return Self.accessDeniedMessage(path)
 
         case .databaseUnreadable(let path, let detail):
             return """
@@ -124,8 +154,8 @@ public enum ToolError: Error, Equatable {
                   \(path)
 
                 The file is opened read-only and immutable, so this is never a lock held
-                by WhatsApp — check that the path above still exists and is readable by
-                your user.
+                by WhatsApp. macOS did not report a permission refusal, so check that the
+                file is intact; if WhatsApp is mid-update, open it once and try again.
                 """
 
         case .schemaUnexpected(let missingTables):

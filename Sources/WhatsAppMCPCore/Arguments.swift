@@ -32,14 +32,30 @@ public struct Arguments {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    public func bool(_ name: String, default fallback: Bool = false) -> Bool {
-        values[name]?.boolValue ?? fallback
+    /// A filter that is present but not a boolean is an error, never "not applied": the
+    /// answer to `from_me: "yes"` that quietly ignores it is every message from both sides,
+    /// and nothing in it says the filter was dropped. The strings "true" and "false" are
+    /// accepted, for the same reason numeric ids are — a client that serialises everything
+    /// as text should not be punished for it.
+    public func bool(_ name: String, default fallback: Bool = false) throws -> Bool {
+        try optionalBool(name) ?? fallback
     }
 
     /// Nil when absent, which is what separates "only messages I sent" from "any
     /// message". A tri-state has to stay a tri-state.
-    public func optionalBool(_ name: String) -> Bool? {
-        values[name]?.boolValue
+    public func optionalBool(_ name: String) throws -> Bool? {
+        // JSON null is how a client says "not set"; an empty or blank string is not — it is
+        // a filter that was meant and got lost, and dropping it widens the answer.
+        guard let raw = values[name], raw != .null else { return nil }
+        if let flag = raw.boolValue { return flag }
+        if let text = raw.stringValue {
+            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true": return true
+            case "false": return false
+            default: break
+            }
+        }
+        throw ToolError.badArgument(name: name, reason: "true or false was expected")
     }
 
     public func requiredInt(_ name: String) throws -> Int64 {

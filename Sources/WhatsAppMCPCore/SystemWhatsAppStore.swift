@@ -36,14 +36,18 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     // MARK: Availability
 
     public func availability() -> StoreAvailability {
-        guard FileManager.default.fileExists(atPath: path) else {
-            return .databaseMissing(path: path)
+        switch FileAccess.probe(path) {
+        case .missing: return .databaseMissing(path: path)
+        case .denied: return .accessDenied(path: path)
+        case .readable, .other: break
         }
         do {
             let database = try ReadOnlyDatabase(path: path)
             let present = try database.tableNames()
             let missing = Self.requiredTables.filter { !present.contains($0) }
             return missing.isEmpty ? .ready : .schemaUnexpected(missingTables: missing)
+        } catch let failure as ReadOnlyDatabase.OpenFailure where failure.isPermissionDenied {
+            return .accessDenied(path: path)
         } catch {
             return .databaseUnreadable(path: path, detail: Self.describe(error))
         }
@@ -305,7 +309,13 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             FROM ZWAMESSAGE m
             JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION
             LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-            LEFT JOIN ZWAPROFILEPUSHNAME pn ON pn.ZJID = gm.ZMEMBERJID
+            -- One row per JID. Core Data enforces no uniqueness on ZJID, and a second row for
+            -- the same JID would repeat every message of that sender (and inflate the counts
+            -- above them). The newest row with a name, by rowid, wins — the same one
+            -- `profileNames` keeps — so a name never differs from one tool to the next.
+            LEFT JOIN (SELECT ZJID, ZPUSHNAME, MAX(rowid) FROM ZWAPROFILEPUSHNAME
+                       WHERE ZPUSHNAME IS NOT NULL AND ZPUSHNAME <> '' GROUP BY ZJID) pn
+                ON pn.ZJID = gm.ZMEMBERJID
             LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
             \(previewJoin)
             """
@@ -437,7 +447,8 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     /// LID.
     private static func profileNames(_ database: ReadOnlyDatabase) throws -> [String: String] {
         var names: [String: String] = [:]
-        try database.query("SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME") { row in
+        // Oldest first, so when a JID has several rows the newest is the one left standing.
+        try database.query("SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME ORDER BY rowid") { row in
             if let jid = row.text(0), let name = row.text(1), !name.isEmpty {
                 names[jid] = name
             }
@@ -656,6 +667,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         do {
             return try ReadOnlyDatabase(path: path)
         } catch {
+            if let failure = error as? ReadOnlyDatabase.OpenFailure, failure.isPermissionDenied {
+                throw ToolError.storeUnavailable(.accessDenied(path: path))
+            }
             guard FileManager.default.fileExists(atPath: path) else {
                 throw ToolError.storeUnavailable(.databaseMissing(path: path))
             }

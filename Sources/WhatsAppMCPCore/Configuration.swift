@@ -22,7 +22,8 @@ public struct Configuration: Sendable, Equatable {
     /// the real cache.
     public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
 
-    /// The `ffmpeg` that converts audio macOS cannot open (WhatsApp voice notes are Ogg Opus).
+    /// The `ffmpeg` that converts what macOS cannot open itself: a video's sound track and
+    /// containers like Matroska.
     /// Nil means "look in Homebrew's two prefixes"; a path given here is used as it is.
     public var ffmpegPath: String?
 
@@ -34,8 +35,9 @@ public struct Configuration: Sendable, Equatable {
         URL(fileURLWithPath: databasePath).deletingLastPathComponent()
     }
 
-    /// WhatsApp's group container. Not TCC-protected, unlike `~/Library/Messages`, which
-    /// is what makes the whole read path possible with no grant and no prompt.
+    /// WhatsApp's group container. On recent macOS another app's data needs Full Disk Access
+    /// for the program that opens it; without that grant the file can be seen but not read,
+    /// which `SystemWhatsAppStore.availability()` reports as `.accessDenied`.
     public static var defaultDatabasePath: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(

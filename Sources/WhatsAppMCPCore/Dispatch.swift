@@ -123,8 +123,8 @@ public struct WhatsAppTools: Sendable {
         var query = ChatQuery()
         query.name = arguments.optionalString("name")
         query.kinds = try arguments.chatKinds("kinds")
-        query.includeArchived = arguments.bool("include_archived")
-        query.includeHidden = arguments.bool("include_hidden")
+        query.includeArchived = try arguments.bool("include_archived")
+        query.includeHidden = try arguments.bool("include_hidden")
         query.limit = try arguments.int(
             "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
         query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
@@ -243,6 +243,8 @@ public struct WhatsAppTools: Sendable {
             return format.transcription(result, heading: heading)
         } catch let failure as TranscriptionError {
             throw ToolError.mediaProblem(failure.message)
+        } catch MediaFiles.ViewError.accessDenied(let path) {
+            throw ToolError.accessDenied(path)
         } catch let failure as MediaFiles.ViewError {
             throw ToolError.mediaProblem("The file could not be opened: \(failure).")
         }
@@ -254,6 +256,8 @@ public struct WhatsAppTools: Sendable {
         do {
             return format.mediaFacts(
                 message, attachment: attachment, url: url, facts: try MediaFiles.facts(of: url))
+        } catch MediaFiles.ViewError.accessDenied(let path) {
+            throw ToolError.accessDenied(path)
         } catch {
             throw ToolError.mediaProblem("The file could not be read: \(error.localizedDescription)")
         }
@@ -319,6 +323,8 @@ public struct WhatsAppTools: Sendable {
             }
         } catch let failure as MediaFiles.ViewError {
             switch failure {
+            case .accessDenied(let path):
+                throw ToolError.accessDenied(path)
             case .unreadable(let detail):
                 throw ToolError.mediaProblem("This attachment could not be opened: \(detail).")
             case .tooManyPixels(let pixels, let limit):
@@ -388,7 +394,7 @@ public struct WhatsAppTools: Sendable {
                 return format.channels(channels, snapshot: snapshot)
             }
         } catch let failure as SnapshotError {
-            throw ToolError.storeFailure(failure.message)
+            throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
         }
@@ -422,7 +428,7 @@ public struct WhatsAppTools: Sendable {
         } catch let refusal as ReadOnlyDatabase.SelectRefusal {
             throw ToolError.queryRefused(refusal.detail)
         } catch let failure as SnapshotError {
-            throw ToolError.storeFailure(failure.message)
+            throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
         }
@@ -452,8 +458,8 @@ public struct WhatsAppTools: Sendable {
         var query = MessageQuery()
         query.after = try arguments.optionalDate("after")
         query.before = try arguments.optionalDate("before")
-        query.fromMe = arguments.optionalBool("from_me")
-        query.starredOnly = arguments.bool("starred_only")
+        query.fromMe = try arguments.optionalBool("from_me")
+        query.starredOnly = try arguments.bool("starred_only")
         query.newestFirst = try arguments.newestFirst()
         query.limit = try arguments.int(
             "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)

@@ -35,6 +35,8 @@ public enum TranscriptionError: Error, Equatable {
     case engineUnavailable(String)
     case converterMissing
     case conversionFailed(String)
+    /// The file is not a plain audio or video container ffmpeg may be pointed at.
+    case unsupportedFormat
     case unreadable(String)
     case tooLarge(Int64)
 
@@ -79,8 +81,9 @@ public enum TranscriptionError: Error, Equatable {
 
         case .converterMissing:
             return """
-                This audio is in a format macOS cannot open on its own — WhatsApp voice notes \
-                are Ogg Opus — and ffmpeg, which converts it, was not found.
+                macOS could not open this file on its own (a video's sound track and some containers \
+                need a converter, and on older macOS versions so may Ogg Opus voice notes), \
+                and ffmpeg was not found.
 
                 Install it with `brew install ffmpeg`, or point this server at it with \
                 `--ffmpeg /path/to/ffmpeg`. It runs locally, on this one file, with no network.
@@ -88,6 +91,15 @@ public enum TranscriptionError: Error, Equatable {
 
         case .conversionFailed(let detail):
             return "ffmpeg could not convert the audio: \(detail)"
+
+        case .unsupportedFormat:
+            return """
+                This file is not in an audio or video format this server will hand to ffmpeg.
+                Only plain containers recognised by their first bytes are converted (Ogg,
+                MP4/M4A/QuickTime, WAV, MP3, AAC, FLAC, AIFF, CAF, AMR, Matroska); a playlist
+                or any other file is refused, because such a file can name other files for
+                ffmpeg to read.
+                """
 
         case .unreadable(let detail):
             return "The audio could not be read: \(detail)"
@@ -124,14 +136,22 @@ public struct FFmpegConverter: Sendable {
     }
 
     public func convert(_ input: URL, to output: URL) async throws {
+        // Decided here, before anything is started: `-f` names the demuxer so ffmpeg never
+        // sniffs the content itself (see `MediaFormat`), and a file that is not a plain
+        // container never reaches it.
+        guard let demuxer = MediaFormat.ffmpegDemuxer(for: input) else {
+            throw TranscriptionError.unsupportedFormat
+        }
         let process = Process()
         process.executableURL = executable
-        // `-protocol_whitelist file` keeps ffmpeg to local files whatever the input names;
-        // `-nostdin` stops it waiting on a terminal that does not exist; `-vn` drops a
-        // video track so a clip is read for its sound only.
+        // `-f <demuxer>` before `-i` pins the format; `-protocol_whitelist file` keeps ffmpeg
+        // to local files; `file:` makes the path a path even if it began with a dash;
+        // `-nostdin` stops it waiting on a terminal that does not exist; `-map 0:a:0` and
+        // `-vn` read the first audio stream only, so a clip is used for its sound.
         process.arguments = [
             "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file",
-            "-i", input.path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "-y", output.path,
+            "-f", demuxer, "-i", "file:" + input.path, "-map", "0:a:0", "-vn", "-ac", "1",
+            "-ar", "16000", "-f", "wav", "-y", output.path,
         ]
         let errors = Pipe()
         process.standardError = errors
@@ -151,6 +171,8 @@ public struct FFmpegConverter: Sendable {
             throw TranscriptionError.conversionFailed(error.localizedDescription)
         }
         let running = RunningProcess(process)
+        ProcessCleanup.shared.register(child: process)
+        defer { ProcessCleanup.shared.unregister(child: process) }
 
         // Cancelling the request must stop ffmpeg: the scratch directory is deleted when
         // this call unwinds, and a process still writing into it would be left behind.
@@ -250,7 +272,11 @@ public struct TranscriptionService: Sendable {
 
         let scratch = cacheDirectory.appendingPathComponent("tmp/\(UUID().uuidString)")
         try makePrivateDirectory(scratch)
-        defer { try? FileManager.default.removeItem(at: scratch) }
+        ProcessCleanup.shared.register(path: scratch.path)
+        defer {
+            ProcessCleanup.shared.unregister(path: scratch.path)
+            try? FileManager.default.removeItem(at: scratch)
+        }
 
         let (audio, duration) = try await readableAudio(from: url, scratch: scratch)
         let segments = try await engine.transcribe(audio: audio, locale: locale)
@@ -286,8 +312,7 @@ public struct TranscriptionService: Sendable {
 
     private func store(_ transcription: Transcription, at url: URL) throws {
         try makePrivateDirectory(transcriptsDirectory)
-        try JSONEncoder().encode(transcription).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.write(try JSONEncoder().encode(transcription), to: url)
     }
 
     private func makePrivateDirectory(_ url: URL) throws {

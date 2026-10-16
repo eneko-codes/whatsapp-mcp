@@ -34,6 +34,25 @@ private final class FakeEngine: SpeechTranscribing, @unchecked Sendable {
     }
 }
 
+/// The fixture below, reachable from the suites in this file that are not its owner.
+struct TranscriptionFixtureShim {
+    private let inner: TranscriptionFixture
+    init() throws { inner = try TranscriptionFixture() }
+    var directory: URL { inner.directory }
+    var root: URL { inner.root }
+    var media: URL { inner.media }
+    var cache: URL { inner.cache }
+    var engine: any SpeechTranscribing { inner.engine }
+    var transcribeCount: Int { inner.engine.transcribeCount }
+    func remove() { inner.remove() }
+    func fakeFFmpeg(succeeding: Bool = true) throws -> FFmpegConverter { try inner.fakeFFmpeg(succeeding: succeeding) }
+    func ffmpegRuns() -> [String] { inner.ffmpegRuns() }
+}
+
+/// A file that starts like an Ogg stream — all ffmpeg's demuxer pinning looks at — followed by
+/// invented bytes. A real Opus stream is not needed: the fake ffmpeg ignores its input.
+func oggBytes(_ tail: String) -> Data { Data("OggS".utf8) + Data(tail.utf8) }
+
 private struct TranscriptionFixture {
     let directory: URL
     var root: URL { directory.appendingPathComponent("Message") }
@@ -138,7 +157,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("not really opus".utf8).write(to: opus)
+        try oggBytes("not really opus").write(to: opus)
         let tools = fixture.tools(
             converter: try fixture.fakeFFmpeg(), messages: [fixture.voiceNote(id: 7, path: opus.path)])
 
@@ -164,7 +183,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("not really opus".utf8).write(to: opus)
+        try oggBytes("not really opus").write(to: opus)
         let tools = fixture.tools(
             converter: try fixture.fakeFFmpeg(), messages: [fixture.voiceNote(id: 7, path: opus.path)])
 
@@ -186,8 +205,8 @@ struct TranscriptionTests {
         defer { fixture.remove() }
         let first = fixture.media.appendingPathComponent("a.opus")
         let second = fixture.media.appendingPathComponent("b.opus")
-        try Data("same bytes".utf8).write(to: first)
-        try Data("same bytes".utf8).write(to: second)
+        try oggBytes("same bytes").write(to: first)
+        try oggBytes("same bytes").write(to: second)
         let service = fixture.service(converter: try fixture.fakeFFmpeg())
 
         _ = try await service.transcribe(file: first, language: "es")
@@ -201,7 +220,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: opus)
+        try oggBytes("x").write(to: opus)
         _ = try await fixture.service(converter: try fixture.fakeFFmpeg())
             .transcribe(file: opus, language: "es")
 
@@ -225,7 +244,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("original bytes".utf8).write(to: opus)
+        try oggBytes("original bytes").write(to: opus)
         let before = try Data(contentsOf: opus)
         let mediaListing = try FileManager.default.contentsOfDirectory(atPath: fixture.media.path)
 
@@ -251,7 +270,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: opus)
+        try oggBytes("x").write(to: opus)
         let tools = fixture.tools(converter: nil, messages: [fixture.voiceNote(id: 7, path: opus.path)])
         let (text, isError) = await run(tools, ["message_id": .int(7), "language": .string("es")])
         #expect(isError)
@@ -282,10 +301,10 @@ struct TranscriptionTests {
         var (converter, pidFile) = try fixture.hangingFFmpeg()
         converter.timeout = 0.4
         let input = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: input)
+        try oggBytes("x").write(to: input)
 
         let started = Date()
-        await #expect(throws: TranscriptionError.self) {
+        await #expect(throws: TranscriptionError.conversionFailed("it ran past 0 seconds and was stopped")) {
             try await converter.convert(input, to: fixture.bin.appendingPathComponent("out.wav"))
         }
         #expect(Date().timeIntervalSince(started) < 5)
@@ -298,7 +317,7 @@ struct TranscriptionTests {
         defer { fixture.remove() }
         let (converter, pidFile) = try fixture.hangingFFmpeg()
         let input = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: input)
+        try oggBytes("x").write(to: input)
 
         let task = Task {
             try await converter.convert(input, to: fixture.bin.appendingPathComponent("out.wav"))
@@ -318,7 +337,7 @@ struct TranscriptionTests {
             at: shared, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o755])
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: opus)
+        try oggBytes("x").write(to: opus)
 
         let service = TranscriptionService(
             mediaFiles: MediaFiles(root: fixture.root), cacheDirectory: shared,
@@ -372,7 +391,7 @@ struct TranscriptionTests {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
-        try Data("x".utf8).write(to: opus)
+        try oggBytes("x").write(to: opus)
         let tools = fixture.tools(
             converter: try fixture.fakeFFmpeg(succeeding: false),
             messages: [fixture.voiceNote(id: 7, path: opus.path)])
@@ -497,6 +516,124 @@ struct TranscriptionTests {
 /// Runs macOS's real on-device recogniser against speech synthesised by `say` from an
 /// invented sentence. Off by default because it needs a speech model installed and takes
 /// seconds: `WHATSAPP_MCP_SPEECH_TESTS=1 swift test --filter NativeSpeech`.
+@Suite("ffmpeg input is pinned and playlists are refused")
+struct FFmpegPinningTests {
+
+    @Test("The container is recognised from its first bytes, whatever the file is called")
+    func sniffing() {
+        func demuxer(_ bytes: [UInt8]) -> String? { MediaFormat.ffmpegDemuxer(forHeader: bytes) }
+        let ascii: (String) -> [UInt8] = { Array($0.utf8) }
+        #expect(demuxer(ascii("OggS") + [0, 2]) == "ogg")
+        #expect(demuxer(ascii("RIFF") + [0, 0, 0, 0] + ascii("WAVE")) == "wav")
+        #expect(demuxer(ascii("RIFF") + [0, 0, 0, 0] + ascii("AVI ")) == nil)
+        #expect(demuxer(ascii("FORM") + [0, 0, 0, 0] + ascii("AIFF")) == "aiff")
+        #expect(demuxer(ascii("fLaC")) == "flac")
+        #expect(demuxer(ascii("caff") + [0, 1]) == "caf")
+        #expect(demuxer(ascii("FORM") + [0, 0, 0, 0] + ascii("AIFC")) == "aiff")
+        #expect(demuxer([0x1A, 0x45, 0xDF, 0xA3]) == "matroska")
+        #expect(demuxer([0, 0, 0, 0x1C] + ascii("ftypM4A ")) == "mov")
+        #expect(demuxer([0, 0, 0, 8] + ascii("moov")) == "mov")
+        #expect(demuxer(ascii("ID3") + [4, 0]) == "mp3")
+        #expect(demuxer([0xFF, 0xFB, 0x90, 0x00]) == "mp3")
+        #expect(demuxer([0xFF, 0xF1, 0x50, 0x80]) == "aac")
+        #expect(demuxer(ascii("#!AMR\n")) == "amr")
+        // What an attacker would save instead.
+        for hostile in ["#EXTM3U\n#EXTINF:1,\nfile:///x", "ffconcat version 1.0\nfile 'x'", "v=0\no=- 0 0 IN IP4", "<html>", "", "abc"] {
+            #expect(demuxer(ascii(hostile)) == nil, Comment(rawValue: hostile))
+        }
+    }
+
+    private func run(_ file: String, contents: Data, converter: (TranscriptionFixtureShim) throws -> FFmpegConverter)
+        async throws -> (result: Result<Transcription, any Error>, runs: [String])
+    {
+        let shim = try TranscriptionFixtureShim()
+        defer { shim.remove() }
+        let url = shim.media.appendingPathComponent(file)
+        try contents.write(to: url)
+        let service = TranscriptionService(
+            mediaFiles: MediaFiles(root: shim.root), cacheDirectory: shim.cache,
+            converter: try converter(shim), engine: shim.engine)
+        let outcome: Result<Transcription, any Error>
+        do { outcome = .success(try await service.transcribe(file: url, language: "es")) } catch {
+            outcome = .failure(error)
+        }
+        return (outcome, shim.ffmpegRuns())
+    }
+
+    @Test("A playlist saved into Message/ is refused and ffmpeg is never started")
+    func playlistIsRefused() async throws {
+        for name in ["list.m3u8", "list.ffconcat", "list.sdp", "voice.opus"] {
+            let playlist = Data("#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:2.0,\nfile:///etc/hosts\n#EXT-X-ENDLIST\n".utf8)
+            let (outcome, runs) = try await run(name, contents: playlist) { try $0.fakeFFmpeg() }
+            guard case .failure(let error) = outcome else {
+                Issue.record("\(name) was transcribed"); continue
+            }
+            #expect(error as? TranscriptionError == .unsupportedFormat, Comment(rawValue: name))
+            #expect(TranscriptionError.unsupportedFormat.message.contains("playlist"))
+            #expect(runs.isEmpty, Comment(rawValue: "ffmpeg ran for \(name)"))
+        }
+    }
+
+    @Test("ffmpeg is told the container with -f before -i, and reads one audio stream of one file")
+    func argumentsArePinned() async throws {
+        let (outcome, runs) = try await run("note.opus", contents: oggBytes("body")) { try $0.fakeFFmpeg() }
+        guard case .success = outcome else { Issue.record("conversion failed: \(outcome)"); return }
+        let line = try #require(runs.first)
+        let words = line.split(separator: " ").map(String.init)
+        let format = try #require(words.firstIndex(of: "-f"))
+        let input = try #require(words.firstIndex(of: "-i"))
+        #expect(words[format + 1] == "ogg")
+        #expect(format < input, "the demuxer must be named before the input")
+        #expect(words[input + 1].hasPrefix("file:/"))
+        #expect(line.contains("-protocol_whitelist file"))
+        #expect(line.contains("-map 0:a:0"))
+        #expect(line.contains("-nostdin"))
+    }
+
+    @Test("The name of the file decides nothing: Ogg bytes under a .m3u8 name are Ogg")
+    func contentWinsOverName() async throws {
+        let (outcome, runs) = try await run("sneaky.m3u8", contents: oggBytes("body")) { try $0.fakeFFmpeg() }
+        guard case .success = outcome else { Issue.record("\(outcome)"); return }
+        #expect(runs.first?.contains("-f ogg") == true)
+    }
+
+    @Test("With the real ffmpeg, a Matroska clip macOS cannot open is converted; a playlist naming a real file is not",
+          .enabled(if: FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffmpeg")))
+    func realFFmpeg() async throws {
+        let shim = try TranscriptionFixtureShim()
+        defer { shim.remove() }
+        let ffmpeg = URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg")
+        let mka = shim.media.appendingPathComponent("tone.mka")
+        let make = Process()
+        make.executableURL = ffmpeg
+        make.arguments = ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", mka.path]
+        try make.run(); make.waitUntilExit()
+        #expect(make.terminationStatus == 0)
+
+        // A real audio file OUTSIDE Message/, and a playlist inside it that names it.
+        let outside = shim.directory.appendingPathComponent("outside.wav")
+        let makeOutside = Process()
+        makeOutside.executableURL = ffmpeg
+        makeOutside.arguments = ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=1", outside.path]
+        try makeOutside.run(); makeOutside.waitUntilExit()
+        let playlist = shim.media.appendingPathComponent("evil.m3u8")
+        try Data("#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:2.0,\nfile://\(outside.path)\n#EXT-X-ENDLIST\n".utf8).write(to: playlist)
+
+        let service = TranscriptionService(
+            mediaFiles: MediaFiles(root: shim.root), cacheDirectory: shim.cache,
+            converter: FFmpegConverter(executable: ffmpeg), engine: shim.engine)
+
+        let converted = try await service.transcribe(file: mka, language: "es")
+        #expect(converted.durationSeconds > 0.9 && converted.durationSeconds < 1.1)
+        #expect(shim.transcribeCount == 1)
+
+        await #expect(throws: TranscriptionError.unsupportedFormat) {
+            _ = try await service.transcribe(file: playlist, language: "es")
+        }
+        #expect(shim.transcribeCount == 1, "the playlist reached the engine")
+    }
+}
+
 @Suite("Language resolution")
 struct LanguageResolutionTests {
     private let supported = ["en-GB", "en-US", "es-CL", "es-ES", "es-MX", "es-US", "fr-FR", "pt-BR", "pt-PT"]

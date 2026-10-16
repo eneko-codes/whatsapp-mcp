@@ -21,13 +21,15 @@ The read path takes a database path, so the gentle route is a copy of the store 
 - **Transcripts** (`transcripts/<sha256>-<language>.json`), so the same audio is recognised once. `media_view` on a video writes one too when it is given a `language`.
 - **A scratch directory** (`tmp/<uuid>/`) for the WAV `ffmpeg` produces, deleted when the call ends. A process killed mid-call can leave one behind; it is safe to delete.
 
+No file this server creates in the cache is group- or world-readable at any moment (the stamp and transcript files are created `0600` and renamed into place, `PrivateFile`): the raw backup (`.sqlite.tmp-<uuid>`, which holds keys until the scrub finishes) is created `0600` before SQLite touches it, the rebuilt copy is created under a restrictive `umask` (`PrivateUmask`: `VACUUM INTO` refuses a pre-created output file, so it cannot be made `0600` in advance), and `ProcessCleanup` deletes registered temporaries and kills `ffmpeg` on `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGPIPE` and when stdin closes. `SIGKILL` cannot be handled, so each copy first sweeps temporaries older than an hour (younger ones may be another instance's).
+
 This is **real message data, in plaintext, kept until the owner deletes it** — not a scratch space. Directories this server creates are `0700` and its files `0600`; a directory that already existed keeps its mode, because it is not this server's to change. Never print, commit or attach its contents, and never use it for debugging. A new write location, or a new kind of thing kept there, means amending this section first.
 
 The only `sqlite3_open_v2` in the project that is not `SQLITE_OPEN_READONLY` opens the temporary file a copy is being written to inside that directory.
 
 ## What this is
 
-A local MCP server (Swift 6, stdio transport) for WhatsApp. It reads WhatsApp's databases — the chat store `ChatStorage.sqlite` directly, the rest through the private copies above — and the media files under `Message/`. No network of any kind: no cloud API, no credential, and no model download. Nothing outward-facing, and nothing that changes WhatsApp.
+A local MCP server (Swift 6, stdio transport) for WhatsApp. Reading WhatsApp's container needs Full Disk Access for the program that runs the server on recent macOS (observed on macOS 27), granted per exact program: an ad-hoc rebuild is a new program and loses it. macOS answers a missing grant with `EPERM` on `open(2)` while `stat` still works, so existence and readability are different facts: `FileAccess.probe` (non-blocking, errno-classified) and `OpenFailure.isPermissionDenied` (`SQLITE_AUTH`, `SQLITE_PERM`, `EPERM`, `EACCES`) turn it into `accessDenied`, never "not found". Do not write, or restore, a sentence saying no permission is needed. It reads WhatsApp's databases — the chat store `ChatStorage.sqlite` directly, the rest through the private copies above — and the media files under `Message/`. No network of any kind: no cloud API, no credential, and no model download. Nothing outward-facing, and nothing that changes WhatsApp.
 
 Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
@@ -35,7 +37,7 @@ Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
 - [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against WhatsApp's own databases, opened read-only and immutable through a [URI filename](https://www.sqlite.org/uri.html); `sqlite3_create_function_v2` for accent- and case-insensitive matching; `sqlite3_backup_*` for the cache copies; `sqlite3_set_authorizer` to refuse reads of key material in `db_query`; a progress handler and `SQLITE_LIMIT_LENGTH` to bound it.
 - Apple frameworks, none of which needs a TCC permission as far as has been observed: `Speech` (`SpeechAnalyzer`/`SpeechTranscriber`, macOS 26 and later, on-device only), `AVFoundation`, `ImageIO`, `PDFKit`, `CryptoKit`, `UniformTypeIdentifiers`.
-- One local subprocess, `ffmpeg` (Homebrew's prefixes or `--ffmpeg`), run on a single file with `-protocol_whitelist file`, to convert Ogg Opus, which macOS cannot open.
+- One local subprocess, `ffmpeg` (Homebrew's prefixes or `--ffmpeg`), for a video's sound track and containers `AVAudioFile` cannot open — on macOS 27 it opens Ogg Opus, MP3 and M4A itself, so those never reach ffmpeg (older versions are untested). It runs on one file with `-protocol_whitelist file`, and **the demuxer is never left to ffmpeg**: `MediaFormat` decides it from the first bytes, ffmpeg is told with `-f`, and anything else (a playlist, `.ffconcat`, `.sdp`) is refused before it starts — a playlist names other files that ffmpeg would read. Do not remove that.
 
 ## Surface not used
 
@@ -53,6 +55,7 @@ swift build
 swift build -c release
 swift test
 WHATSAPP_MCP_SPEECH_TESTS=1 swift test --filter NativeSpeech   # real recogniser, synthesised speech; off by default
+swift build && WHATSAPP_MCP_E2E=1 swift test --filter ServerLifecycle   # starts the built binary and stops it with real signals; needs the en-US speech model; off by default
 ```
 
 ## Architecture

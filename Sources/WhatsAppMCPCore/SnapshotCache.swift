@@ -83,13 +83,24 @@ public struct SnapshotInfo: Sendable, Equatable {
 
 public enum SnapshotError: Error, Equatable {
     case sourceMissing(AllowedDatabase)
+    /// macOS refused to open the source; carries the path for the message.
+    case accessDenied(AllowedDatabase, String)
     case copyFailed(AllowedDatabase, String)
+
+    /// A refusal by macOS gets its own error, with the steps, rather than the generic
+    /// "database returned an error" wrapper.
+    var toolError: ToolError {
+        if case .accessDenied(_, let path) = self { return .accessDenied(path) }
+        return .storeFailure(message)
+    }
 
     public var message: String {
         switch self {
         case .sourceMissing(let database):
             "\(database.rawValue) is not in WhatsApp's container on this Mac — this WhatsApp "
                 + "version may not have that database."
+        case .accessDenied(_, let path):
+            ToolError.accessDeniedMessage(path)
         case .copyFailed(let database, let detail):
             "Could not copy \(database.rawValue) into the cache: \(detail)"
         }
@@ -128,15 +139,19 @@ public struct SnapshotCache: Sendable {
     }
 
     /// The copy of `database`, taken now if there is none or the source has changed.
-    public func snapshot(of database: AllowedDatabase) throws -> (url: URL, info: SnapshotInfo) {
+    public func snapshot(of database: AllowedDatabase, forceRefresh: Bool = false) throws -> (
+        url: URL, info: SnapshotInfo
+    ) {
         let source = containerDirectory.appendingPathComponent(database.relativePath)
-        guard FileManager.default.fileExists(atPath: source.path) else {
-            throw SnapshotError.sourceMissing(database)
+        switch FileAccess.probe(source.path) {
+        case .missing: throw SnapshotError.sourceMissing(database)
+        case .denied: throw SnapshotError.accessDenied(database, source.path)
+        case .readable, .other: break
         }
         let copy = cacheDirectory.appendingPathComponent(database.cacheFileName)
         let current = Self.stamp(of: source)
 
-        if FileManager.default.fileExists(atPath: copy.path),
+        if !forceRefresh, FileManager.default.fileExists(atPath: copy.path),
             let recorded = readRecord(for: database), recorded.stamp == current,
             recorded.scrubVersion == Self.scrubVersion
         {
@@ -149,6 +164,46 @@ public struct SnapshotCache: Sendable {
             scrubVersion: Self.scrubVersion)
         try writeRecord(record, for: database)
         return (copy, info(record, database: database, stale: false))
+    }
+
+    /// The cached copy, opened and proven readable.
+    ///
+    /// A copy can be unreadable while its stamp still says it is current: it was replaced by
+    /// another instance between this call finding it and opening it, or truncated, or half
+    /// written by a process that was killed. Reporting that would be wrong — the source is
+    /// fine — and so would trusting the stamp. One cheap read decides; if the copy is damaged
+    /// it is made again, once, and only a second failure is an error.
+    func openReadable(_ database: AllowedDatabase) throws -> (
+        database: ReadOnlyDatabase, info: SnapshotInfo
+    ) {
+        func attempt(forceRefresh: Bool) throws -> (ReadOnlyDatabase, SnapshotInfo) {
+            let (url, info) = try snapshot(of: database, forceRefresh: forceRefresh)
+            let connection = try ReadOnlyDatabase(path: url.path)
+            _ = try connection.tableNames()
+            return (connection, info)
+        }
+        do {
+            return try attempt(forceRefresh: false)
+        } catch let failure as ReadOnlyDatabase.OpenFailure where failure.isDamaged {
+            return try retry(database, attempt)
+        } catch let failure as ReadOnlyDatabase.QueryFailure where failure.isDamaged {
+            return try retry(database, attempt)
+        } catch let failure as ReadOnlyDatabase.OpenFailure {
+            throw SnapshotError.copyFailed(database, "the cached copy could not be opened: \(failure.detail)")
+        }
+    }
+
+    private func retry(
+        _ database: AllowedDatabase,
+        _ attempt: (Bool) throws -> (ReadOnlyDatabase, SnapshotInfo)
+    ) throws -> (ReadOnlyDatabase, SnapshotInfo) {
+        do {
+            return try attempt(true)
+        } catch let failure as ReadOnlyDatabase.OpenFailure {
+            throw SnapshotError.copyFailed(database, "the copy is unreadable even after it was made again: \(failure.detail)")
+        } catch let failure as ReadOnlyDatabase.QueryFailure {
+            throw SnapshotError.copyFailed(database, "the copy is unreadable even after it was made again: \(failure.detail)")
+        }
     }
 
     /// What is cached right now, without copying anything. Databases never copied are
@@ -217,8 +272,7 @@ public struct SnapshotCache: Sendable {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let url = recordURL(for: database)
-        try encoder.encode(record).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.write(try encoder.encode(record), to: url)
     }
 
     private func info(_ record: Record, database: AllowedDatabase, stale: Bool) -> SnapshotInfo {
@@ -239,12 +293,32 @@ public struct SnapshotCache: Sendable {
     {
         let fileManager = FileManager.default
         try PrivateDirectory.ensure(cacheDirectory)
+        Self.sweepStaleTemporaries(in: cacheDirectory)
 
         let temporary = cacheDirectory.appendingPathComponent(
             "\(database.cacheFileName).tmp-\(UUID().uuidString)")
         // The scrubbed copy is rebuilt into this second file, so the first — which still
         // holds the keys in its free pages — never becomes the cache.
         let rebuilt = URL(fileURLWithPath: temporary.path + ".rebuilt")
+
+        // Owner-only from the first byte. `sqlite3_open_v2` would create these with the
+        // umask's 0644, and the first of them is the raw backup — keys and all — for as long
+        // as the scrub takes. Created empty here, SQLite opens and keeps the existing mode
+        // (and gives its journal the same one).
+        // Registered before they exist: a signal that arrives between creating a file and
+        // registering it would leave the raw backup behind.
+        ProcessCleanup.shared.register(path: temporary.path)
+        ProcessCleanup.shared.register(path: rebuilt.path)
+        defer {
+            ProcessCleanup.shared.unregister(path: temporary.path)
+            ProcessCleanup.shared.unregister(path: rebuilt.path)
+        }
+        guard fileManager.createFile(
+            atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        else { throw SnapshotError.copyFailed(database, "could not create \(temporary.lastPathComponent)") }
+        // `rebuilt` cannot be pre-created: `VACUUM INTO` refuses an output file that exists,
+        // even an empty one. It is made owner-only by a restrictive umask around that one
+        // statement instead (see `PrivateUmask`).
         // The backup copies WhatsApp's "WAL mode" header into the new file, so SQLite creates
         // `-shm` and `-wal` beside it while it is open. Remove them with the temporary.
         defer {
@@ -266,7 +340,13 @@ public struct SnapshotCache: Sendable {
                     SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let sourceHandle
             else {
                 let detail = sourceHandle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+                let failure = ReadOnlyDatabase.OpenFailure(
+                    code: sourceHandle.map { sqlite3_extended_errcode($0) } ?? SQLITE_CANTOPEN,
+                    detail: detail, systemErrno: sourceHandle.map { sqlite3_system_errno($0) } ?? 0)
                 if let sourceHandle { sqlite3_close_v2(sourceHandle) }
+                if failure.isPermissionDenied {
+                    throw SnapshotError.accessDenied(database, source.path)
+                }
                 throw fail(detail)
             }
             defer { sqlite3_close_v2(sourceHandle) }
@@ -309,8 +389,10 @@ public struct SnapshotCache: Sendable {
             // directory.
             var rebuildError: UnsafeMutablePointer<CChar>?
             let escaped = rebuilt.path.replacingOccurrences(of: "'", with: "''")
-            guard sqlite3_exec(destinationHandle, "VACUUM INTO '\(escaped)'", nil, nil, &rebuildError) == SQLITE_OK
-            else {
+            let rebuiltCode = PrivateUmask.run {
+                sqlite3_exec(destinationHandle, "VACUUM INTO '\(escaped)'", nil, nil, &rebuildError)
+            }
+            guard rebuiltCode == SQLITE_OK else {
                 let detail = rebuildError.map { String(cString: $0) } ?? "unknown"
                 sqlite3_free(rebuildError)
                 throw fail("the cleaned copy could not be rebuilt: \(detail)")
@@ -394,6 +476,49 @@ public struct SnapshotCache: Sendable {
                 else { continue }
                 try exec("UPDATE \(quoted(table)) SET \(quoted(actual)) = NULL")
             }
+        }
+    }
+
+    // MARK: Leftovers
+
+    /// How old a temporary must be before it is taken for a dead process's. Another instance
+    /// may be mid-copy in the same directory, and a copy touches its file continuously, so
+    /// anything modified within the last hour is left alone.
+    static let staleAfter: TimeInterval = 3600
+
+    /// Removes what a killed process left in the cache: `<Name>.sqlite.tmp-<uuid>` (the raw,
+    /// unscrubbed backup, and its `.rebuilt`) and `tmp/<uuid>` scratch directories. `SIGKILL`
+    /// and a power cut run no cleanup, so this is the only thing that ever deletes them.
+    static func sweepStaleTemporaries(in directory: URL, now: Date = Date()) {
+        let fileManager = FileManager.default
+        func modified(_ url: URL) -> Date? {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        // A scratch directory is touched when files appear in it, not while ffmpeg writes one,
+        // so a long conversion looks old unless what is inside is looked at too.
+        func isStale(_ url: URL) -> Bool {
+            var newest = modified(url)
+            for name in (try? fileManager.contentsOfDirectory(atPath: url.path)) ?? [] {
+                if let inner = modified(url.appendingPathComponent(name)), inner > (newest ?? .distantPast) {
+                    newest = inner
+                }
+            }
+            guard let newest else { return false }
+            return now.timeIntervalSince(newest) > staleAfter
+        }
+        for name in (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
+        where name.contains(".sqlite.tmp-") {
+            let url = directory.appendingPathComponent(name)
+            if isStale(url) { try? fileManager.removeItem(at: url) }
+        }
+        let scratch = directory.appendingPathComponent("tmp")
+        // Only a real directory: a symlink here would send the sweep into somewhere else.
+        guard (try? fileManager.attributesOfItem(atPath: scratch.path))?[.type] as? FileAttributeType
+            == .typeDirectory
+        else { return }
+        for name in (try? fileManager.contentsOfDirectory(atPath: scratch.path)) ?? [] {
+            let url = scratch.appendingPathComponent(name)
+            if isStale(url) { try? fileManager.removeItem(at: url) }
         }
     }
 }

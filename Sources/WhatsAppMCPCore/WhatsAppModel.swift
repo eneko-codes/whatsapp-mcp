@@ -109,7 +109,7 @@ public struct Identity: Sendable, Equatable {
 
     public init(jid: String, displayName: String, profilePicturePath: String? = nil) {
         self.jid = jid
-        self.displayName = displayName
+        self.displayName = displayName.displaySafe
         self.kind = IdentityKind(jid: jid)
         self.profilePicturePath = profilePicturePath
     }
@@ -154,14 +154,14 @@ public struct Chat: Sendable, Equatable {
     ) {
         self.id = id
         self.jid = jid
-        self.name = name
+        self.name = name.displaySafe
         self.kind = kind
         self.isArchived = isArchived
         self.isHidden = isHidden
         self.unreadCount = unreadCount
         self.messageCount = messageCount
         self.lastMessageDate = lastMessageDate
-        self.lastMessageText = lastMessageText
+        self.lastMessageText = lastMessageText?.displaySafe
         self.isPinned = isPinned
     }
 }
@@ -260,8 +260,8 @@ public struct Attachment: Sendable, Equatable {
         self.localPath = localPath
         self.fileSize = fileSize
         self.duration = duration
-        self.title = title
-        self.author = author
+        self.title = title?.displaySafe
+        self.author = author?.displaySafe
         self.remoteURL = remoteURL
     }
 }
@@ -358,7 +358,7 @@ public struct ContactCard: Sendable, Equatable {
     /// falling through to "some unknown type 4" would not be.
     public init?(name: String?, vcard: String?, typeCode: Int) {
         guard typeCode == MessageTypeCode.contact else { return nil }
-        self.name = name
+        self.name = name?.displaySafe
         self.vcard = vcard
     }
 }
@@ -379,8 +379,8 @@ public struct LinkPreview: Sendable, Equatable {
 
     public init(url: String?, title: String?, summary: String?) {
         self.url = url
-        self.title = title
-        self.summary = summary
+        self.title = title?.displaySafe
+        self.summary = summary?.displaySafe
     }
 
     public var isEmpty: Bool { url == nil && title == nil && summary == nil }
@@ -475,7 +475,7 @@ public struct Mention: Sendable, Equatable {
     public init(digits: String, name: String?) {
         self.digits = digits
         self.jid = "\(digits)@lid"
-        self.name = name
+        self.name = name?.displaySafe
     }
 }
 
@@ -513,7 +513,7 @@ public struct Message: Sendable, Equatable {
     ) {
         self.id = id
         self.chatID = chatID
-        self.chatName = chatName
+        self.chatName = chatName.displaySafe
         self.date = date
         self.sentDate = sentDate
         self.isFromMe = isFromMe

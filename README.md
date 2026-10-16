@@ -39,8 +39,9 @@ Not affiliated with or endorsed by WhatsApp or Meta.
 - WhatsApp for Mac, installed and signed in — this server reads its local database and never
   talks to WhatsApp's own servers
 
-There is no code signing identity to obtain first: this server needs no TCC permission, so
-there is nothing for a signature to anchor to — see [Install](#install).
+Reading WhatsApp's data needs **Full Disk Access** for this server's program on recent macOS,
+and macOS ties that grant to the exact program: every rebuilt or updated copy needs it again
+— see [Permissions](#permissions).
 
 ## Tools
 
@@ -79,10 +80,11 @@ verified, so there is no tool for it (`db_query` can reach it). There is deliber
 
 ## Frameworks and APIs
 
-No TCC permission has been needed: WhatsApp's container is not protected the way Apple's own
-stores are, and the speech engine ran without a prompt from the unsigned release binary
-launched from a terminal. That has **not** been checked from the installed bundle under
-Claude Desktop — if macOS asks for Speech Recognition there, grant it.
+Reading WhatsApp's container needs Full Disk Access (see [Permissions](#permissions)). The
+Apple frameworks used here have needed no other grant: the speech engine ran without a prompt
+from the unsigned release binary launched from a terminal. Whether Claude Desktop shows a
+Speech Recognition prompt for the installed bundle has not been checked on a clean install; if
+macOS asks, grant it.
 
 | Used | For | Reference |
 |---|---|---|
@@ -92,7 +94,7 @@ Claude Desktop — if macOS asks for Speech Recognition there, grant it.
 | `Speech` — `SpeechAnalyzer`, `SpeechTranscriber` (macOS 26+) | On-device transcription; no server path, no model download | [Speech](https://developer.apple.com/documentation/speech) |
 | `AVFoundation`, `ImageIO`, `PDFKit` | Video frames, image reduction, PDF text | — |
 | `CryptoKit`, `UniformTypeIdentifiers` | SHA-256 and MIME types | — |
-| `ffmpeg` (subprocess, local file only) | Converting Ogg Opus voice notes, which macOS cannot open | [ffmpeg](https://ffmpeg.org/) |
+| `ffmpeg` (subprocess, one local file, format pinned by its first bytes) | A video's sound track and containers macOS cannot open; not Ogg Opus voice notes, MP3 or M4A, which `AVAudioFile` opens itself (checked on macOS 27 only) | [ffmpeg](https://ffmpeg.org/) |
 
 Not used: FTS or `MATCH`, the blob API, busy handlers, and any network access.
 
@@ -121,19 +123,45 @@ files for their own transient work.
 - macOS 26 or later, and the speech model for your language installed (System Settings →
   Keyboard → Dictation). A language that is supported but not installed is reported; nothing is
   downloaded.
-- `ffmpeg` for WhatsApp voice notes: `brew install ffmpeg`, or `--ffmpeg /path/to/ffmpeg`.
+- `ffmpeg`, only for a video's sound track and containers macOS cannot open (on macOS 27
+  WhatsApp's own Ogg Opus voice notes, MP3 and M4A open without it; older versions are untested): `brew install ffmpeg`, or
+  `--ffmpeg /path/to/ffmpeg`. It is run on one file whose format is decided here from its first
+  bytes and passed with `-f`; a playlist or any other file is refused, because a playlist can
+  name other files for ffmpeg to read.
 - Basque and Catalan were not in the engine's list when this was written, and macOS does not
   detect the language, so `audio_transcribe` requires one; the error lists what the engine
   offers. A bare language (`es`) is accepted only when there is a single model for it, never
   picked for you from several.
 
+## Permissions
+
+On recent macOS (observed on macOS 27) another app's data folder is protected:
+`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared` can be seen but not opened by
+a program that has not been granted **Full Disk Access**. macOS answers that with a refusal
+(`EPERM`), and this server reports it as one — `ACCESS DENIED` in `whatsapp_status` and the
+same steps in every tool — and not as "not found".
+
+1. System Settings → Privacy & Security → **Full Disk Access**.
+2. Turn on, or add with **+**, the program that runs the server. Under Claude Desktop that is
+   `whatsapp-mcp` itself (Claude runs extensions through its own helper, which makes the
+   server its own program to macOS); the path is on the `binary:` line of `whatsapp_status`.
+   If you start the server by hand, it is the terminal or app you started it from.
+3. Quit that app completely and open it again.
+
+**Repeat this after every update.** The grant belongs to the exact program: a rebuilt
+`whatsapp-mcp` signed ad-hoc is a new program to macOS, and so is a new version of whatever
+app launches it (Claude Code lost its own grant this way when it updated). A stable signing
+identity would keep the grant across rebuilds, but a certificate's subject carries the name
+of whoever holds it, so a binary meant to be published must not be signed with a personal one.
+
+**Uninstalling:** remove the extension in Claude, remove the `whatsapp-mcp` entry from Full
+Disk Access, and delete the cache (`rm -rf ~/Library/Caches/whatsapp-mcp` — it holds
+plaintext copies of your WhatsApp data and is not removed with the extension).
+
 ## The rules worth knowing before you use it
 
-**No macOS permission is needed to read WhatsApp.** Its group container
-(`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared`) is not protected by TCC the
-way Apple's own Calendar, Reminders or Contacts stores are. If a *terminal or an app* that
-launches this server cannot list that folder, it is lacking Full Disk Access — that applies
-to the launching app, not to this binary.
+**Reading WhatsApp needs Full Disk Access** — see [Permissions](#permissions). Without it the
+server says so, with the steps, instead of reporting a missing file.
 
 **The newest messages can be briefly invisible.** The database is opened
 `mode=ro&immutable=1`: read-only alone still takes locks and can touch the write-ahead log,
@@ -171,8 +199,10 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 
 That builds an arm64 (Apple silicon only) release binary and writes
 `dist/whatsapp-mcp.mcpb`. There is no `Info.plist` embedded; none has been needed so far (see
-[Frameworks and APIs](#frameworks-and-apis)). An ad-hoc signature (the default) is enough to
-run on this Mac; set `MCPB_SIGN_IDENTITY` only if the bundle is meant to run on another one.
+[Frameworks and APIs](#frameworks-and-apis)). An ad-hoc signature (the default) runs, but it is a new
+program to macOS on every build, so Full Disk Access must be granted again each time. A stable
+identity (`MCPB_SIGN_IDENTITY`) keeps the grant — but never sign a binary you publish with a
+personal certificate, whose subject carries its holder's name.
 
 ### 2. Install it
 
@@ -182,9 +212,9 @@ one keeps answering.
 
 ### 3. Check it
 
-Call `whatsapp_status`. Reading WhatsApp needs no grant. If it cannot find the database, the
-fix is opening WhatsApp for Mac at least once, not a setting in System Settings. For voice
-notes, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
+Call `whatsapp_status`. It says `readable` when macOS lets the server open WhatsApp's database;
+`ACCESS DENIED` means Full Disk Access is missing (see [Permissions](#permissions)) and `NOT
+FOUND` means the file is not there — open WhatsApp for Mac at least once. For a video's sound, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
 
 ## Tool switches
 
@@ -193,8 +223,8 @@ because the manifest declares them all. No tool changes WhatsApp, so there is no
 can turn on anything destructive. Two switches are worth knowing: `db_query` reaches any
 allow-listed database, and `audio_transcribe` is the one that declares it writes its cache.
 
-Reading needs no configuration. Voice-note transcription needs `ffmpeg` and the speech model
-for your language (see above); `--ffmpeg` and `--cache-directory` exist for manual runs.
+Reading needs no configuration. Transcription needs the speech model for your language, and
+`ffmpeg` for a video's sound (see above); `--ffmpeg` and `--cache-directory` exist for manual runs.
 
 ## Manual registration instead
 
@@ -241,10 +271,13 @@ swift build
 swift test
 ```
 
-The suite runs entirely against an in-memory fake store, fixture SQLite databases, or files
-generated by the test itself (a gradient, a hand-written PDF, a one-second clip) —
-invented, never a copy of anything real. One more test runs macOS's real recogniser on speech
-synthesised by `say`; it is off unless `WHATSAPP_MCP_SPEECH_TESTS=1`. See `CLAUDE.md`, whose
+The suite runs against an in-memory fake store, fixture SQLite databases, or files generated by
+the test itself (a gradient, a hand-written PDF, a one-second clip) —
+invented, never a copy of anything real. Three things are not that, and say so: a test runs the real `ffmpeg` when Homebrew's is installed
+(and is skipped otherwise); one runs macOS's real recogniser on speech synthesised by `say`, off
+unless `WHATSAPP_MCP_SPEECH_TESTS=1`; and the `ServerLifecycle` suite starts the built debug
+binary and stops it with real signals, off unless `WHATSAPP_MCP_E2E=1` (run `swift build` first;
+it needs the en-US speech model). See `CLAUDE.md`, whose
 hard rule at the top is what makes that non-negotiable.
 
 Manual verification against a real WhatsApp database is the owner's job, and is done on a
