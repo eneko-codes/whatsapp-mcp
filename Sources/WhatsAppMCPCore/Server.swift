@@ -12,10 +12,12 @@ public enum WhatsAppMCPServer {
     public static let instructions = """
         Read access to WhatsApp on this Mac. This server never changes WhatsApp: it cannot \
         write to, lock or delete anything in WhatsApp's container, cannot send, and has no \
-        route to WhatsApp's network or to any other network. Unusually, no macOS permission \
-        is involved either — WhatsApp's container is not protected the way Apple's own \
-        stores are. whatsapp_status says whether the chat database is present and the shape \
-        the queries expect.
+        route to WhatsApp's network or to any other network. On recent macOS, reading \
+        WhatsApp's container needs Full Disk Access for this server's program, and every \
+        rebuilt or updated copy needs it again. whatsapp_status says whether macOS allowed \
+        the read (and, if it refused, the exact steps), whether the chat database is \
+        present, and the shape the queries expect. If a tool reports ACCESS DENIED, give the \
+        person those steps; it is not a missing file.
 
         The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private \
         copies of WhatsApp's databases (taken read-only, refreshed when WhatsApp changes \

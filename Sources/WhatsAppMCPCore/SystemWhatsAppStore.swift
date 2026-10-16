@@ -36,14 +36,18 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     // MARK: Availability
 
     public func availability() -> StoreAvailability {
-        guard FileManager.default.fileExists(atPath: path) else {
-            return .databaseMissing(path: path)
+        switch FileAccess.probe(path) {
+        case .missing: return .databaseMissing(path: path)
+        case .denied: return .accessDenied(path: path)
+        case .readable, .other: break
         }
         do {
             let database = try ReadOnlyDatabase(path: path)
             let present = try database.tableNames()
             let missing = Self.requiredTables.filter { !present.contains($0) }
             return missing.isEmpty ? .ready : .schemaUnexpected(missingTables: missing)
+        } catch let failure as ReadOnlyDatabase.OpenFailure where failure.isPermissionDenied {
+            return .accessDenied(path: path)
         } catch {
             return .databaseUnreadable(path: path, detail: Self.describe(error))
         }

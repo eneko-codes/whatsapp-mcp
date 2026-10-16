@@ -83,13 +83,24 @@ public struct SnapshotInfo: Sendable, Equatable {
 
 public enum SnapshotError: Error, Equatable {
     case sourceMissing(AllowedDatabase)
+    /// macOS refused to open the source; carries the path for the message.
+    case accessDenied(AllowedDatabase, String)
     case copyFailed(AllowedDatabase, String)
+
+    /// A refusal by macOS gets its own error, with the steps, rather than the generic
+    /// "database returned an error" wrapper.
+    var toolError: ToolError {
+        if case .accessDenied(_, let path) = self { return .accessDenied(path) }
+        return .storeFailure(message)
+    }
 
     public var message: String {
         switch self {
         case .sourceMissing(let database):
             "\(database.rawValue) is not in WhatsApp's container on this Mac — this WhatsApp "
                 + "version may not have that database."
+        case .accessDenied(_, let path):
+            ToolError.accessDeniedMessage(path)
         case .copyFailed(let database, let detail):
             "Could not copy \(database.rawValue) into the cache: \(detail)"
         }
@@ -130,8 +141,10 @@ public struct SnapshotCache: Sendable {
     /// The copy of `database`, taken now if there is none or the source has changed.
     public func snapshot(of database: AllowedDatabase) throws -> (url: URL, info: SnapshotInfo) {
         let source = containerDirectory.appendingPathComponent(database.relativePath)
-        guard FileManager.default.fileExists(atPath: source.path) else {
-            throw SnapshotError.sourceMissing(database)
+        switch FileAccess.probe(source.path) {
+        case .missing: throw SnapshotError.sourceMissing(database)
+        case .denied: throw SnapshotError.accessDenied(database, source.path)
+        case .readable, .other: break
         }
         let copy = cacheDirectory.appendingPathComponent(database.cacheFileName)
         let current = Self.stamp(of: source)
@@ -266,7 +279,13 @@ public struct SnapshotCache: Sendable {
                     SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let sourceHandle
             else {
                 let detail = sourceHandle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
+                let failure = ReadOnlyDatabase.OpenFailure(
+                    code: sourceHandle.map { sqlite3_extended_errcode($0) } ?? SQLITE_CANTOPEN,
+                    detail: detail, systemErrno: sourceHandle.map { sqlite3_system_errno($0) } ?? 0)
                 if let sourceHandle { sqlite3_close_v2(sourceHandle) }
+                if failure.isPermissionDenied {
+                    throw SnapshotError.accessDenied(database, source.path)
+                }
                 throw fail(detail)
             }
             defer { sqlite3_close_v2(sourceHandle) }

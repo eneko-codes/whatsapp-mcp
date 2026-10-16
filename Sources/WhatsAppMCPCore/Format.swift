@@ -34,6 +34,9 @@ public struct Format: Sendable {
             lines.append("  status: readable")
         case .databaseMissing:
             lines.append("  status: NOT FOUND — is WhatsApp for Mac installed and signed in?")
+        case .accessDenied:
+            lines.append(
+                "  status: ACCESS DENIED — the file is there but macOS refused to open it")
         case .databaseUnreadable(_, let detail):
             lines.append("  status: UNREADABLE — \(detail)")
         case .schemaUnexpected(let missing):
@@ -62,7 +65,17 @@ public struct Format: Sendable {
                     + info.absentOptionalTables.joined(separator: ", ")
                     + " — those fields come back empty")
         }
-        lines.append("  permission: none needed — this container is not TCC-protected")
+        switch availability {
+        case .accessDenied:
+            lines.append("  permission: DENIED by macOS — this server's program needs Full Disk Access:")
+            lines.append("    System Settings → Privacy & Security → Full Disk Access, turn on the")
+            lines.append("    program on the `binary:` line above (or add it with +), then quit and")
+            lines.append("    reopen Claude. A rebuilt or updated copy is a new program: grant it again.")
+        case .ready:
+            lines.append("  permission: macOS allowed this server to read it")
+        case .databaseMissing, .databaseUnreadable, .schemaUnexpected:
+            lines.append("  permission: not the problem shown above (macOS did not refuse the read)")
+        }
 
         lines.append("")
         lines.append("COPIES · private snapshots read by db_tables, db_schema and db_query")

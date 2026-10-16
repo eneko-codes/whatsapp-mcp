@@ -39,8 +39,9 @@ Not affiliated with or endorsed by WhatsApp or Meta.
 - WhatsApp for Mac, installed and signed in — this server reads its local database and never
   talks to WhatsApp's own servers
 
-There is no code signing identity to obtain first: this server needs no TCC permission, so
-there is nothing for a signature to anchor to — see [Install](#install).
+Reading WhatsApp's data needs **Full Disk Access** for this server's program on recent macOS,
+and macOS ties that grant to the exact program: every rebuilt or updated copy needs it again
+— see [Permissions](#permissions).
 
 ## Tools
 
@@ -79,10 +80,10 @@ verified, so there is no tool for it (`db_query` can reach it). There is deliber
 
 ## Frameworks and APIs
 
-No TCC permission has been needed: WhatsApp's container is not protected the way Apple's own
-stores are, and the speech engine ran without a prompt from the unsigned release binary
-launched from a terminal. That has **not** been checked from the installed bundle under
-Claude Desktop — if macOS asks for Speech Recognition there, grant it.
+Reading WhatsApp's container needs Full Disk Access (see [Permissions](#permissions)). The
+Apple frameworks used here have needed no other grant: the speech engine ran without a prompt
+from the unsigned release binary launched from a terminal, and produced a transcript from the
+installed bundle under Claude Desktop. If macOS ever asks for Speech Recognition, grant it.
 
 | Used | For | Reference |
 |---|---|---|
@@ -127,13 +128,35 @@ files for their own transient work.
   offers. A bare language (`es`) is accepted only when there is a single model for it, never
   picked for you from several.
 
+## Permissions
+
+On recent macOS (checked on 26 and 27) another app's data folder is protected:
+`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared` can be seen but not opened by
+a program that has not been granted **Full Disk Access**. macOS answers that with a refusal
+(`EPERM`), and this server reports it as one — `ACCESS DENIED` in `whatsapp_status` and the
+same steps in every tool — and not as "not found".
+
+1. System Settings → Privacy & Security → **Full Disk Access**.
+2. Turn on, or add with **+**, the program that runs the server. Under Claude Desktop that is
+   `whatsapp-mcp` itself (Claude runs extensions through its own helper, which makes the
+   server its own program to macOS); the path is on the `binary:` line of `whatsapp_status`.
+   If you start the server by hand, it is the terminal or app you started it from.
+3. Quit that app completely and open it again.
+
+**Repeat this after every update.** The grant belongs to the exact program: a rebuilt
+`whatsapp-mcp` signed ad-hoc is a new program to macOS, and so is a new version of whatever
+app launches it (Claude Code lost its own grant this way when it updated). A stable signing
+identity would keep the grant across rebuilds, but a certificate's subject carries the name
+of whoever holds it, so a binary meant to be published must not be signed with a personal one.
+
+**Uninstalling:** remove the extension in Claude, remove the `whatsapp-mcp` entry from Full
+Disk Access, and delete the cache (`rm -rf ~/Library/Caches/whatsapp-mcp` — it holds
+plaintext copies of your WhatsApp data and is not removed with the extension).
+
 ## The rules worth knowing before you use it
 
-**No macOS permission is needed to read WhatsApp.** Its group container
-(`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared`) is not protected by TCC the
-way Apple's own Calendar, Reminders or Contacts stores are. If a *terminal or an app* that
-launches this server cannot list that folder, it is lacking Full Disk Access — that applies
-to the launching app, not to this binary.
+**Reading WhatsApp needs Full Disk Access** — see [Permissions](#permissions). Without it the
+server says so, with the steps, instead of reporting a missing file.
 
 **The newest messages can be briefly invisible.** The database is opened
 `mode=ro&immutable=1`: read-only alone still takes locks and can touch the write-ahead log,
@@ -182,9 +205,9 @@ one keeps answering.
 
 ### 3. Check it
 
-Call `whatsapp_status`. Reading WhatsApp needs no grant. If it cannot find the database, the
-fix is opening WhatsApp for Mac at least once, not a setting in System Settings. For voice
-notes, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
+Call `whatsapp_status`. It says `readable` when macOS lets the server open WhatsApp's database;
+`ACCESS DENIED` means Full Disk Access is missing (see [Permissions](#permissions)) and `NOT
+FOUND` means the file is not there — open WhatsApp for Mac at least once. For voice notes, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
 
 ## Tool switches
 

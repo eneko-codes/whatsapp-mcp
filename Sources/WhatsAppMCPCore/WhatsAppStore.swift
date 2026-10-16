@@ -71,12 +71,16 @@ public struct ChatQuery: Sendable, Equatable {
 
 /// Why the chat store cannot be read, when it cannot.
 ///
-/// Unlike the sibling servers there is no authorisation case here, and that is the point:
-/// WhatsApp's group container is not TCC-protected, so the only failures are a file that
-/// is not there and a file that is not shaped the way the queries expect.
+/// Three ways the chat store can fail to be read, and they need three different answers: the
+/// file is not there (open WhatsApp), macOS will not let this program open it (grant Full
+/// Disk Access), or it opened but is not shaped the way the queries expect (a new version
+/// of this server). Telling them apart is the point of the cases below.
 public enum StoreAvailability: Sendable, Equatable {
     case ready
     case databaseMissing(path: String)
+    /// The file exists and macOS refused to open it: on recent macOS another app's data
+    /// folder needs Full Disk Access for the program that runs this server.
+    case accessDenied(path: String)
     case databaseUnreadable(path: String, detail: String)
     /// The file opened but does not carry the tables the queries need — which is what a
     /// WhatsApp update that reorganises the schema would look like from here.

@@ -243,6 +243,8 @@ public struct WhatsAppTools: Sendable {
             return format.transcription(result, heading: heading)
         } catch let failure as TranscriptionError {
             throw ToolError.mediaProblem(failure.message)
+        } catch MediaFiles.ViewError.accessDenied(let path) {
+            throw ToolError.accessDenied(path)
         } catch let failure as MediaFiles.ViewError {
             throw ToolError.mediaProblem("The file could not be opened: \(failure).")
         }
@@ -254,6 +256,8 @@ public struct WhatsAppTools: Sendable {
         do {
             return format.mediaFacts(
                 message, attachment: attachment, url: url, facts: try MediaFiles.facts(of: url))
+        } catch MediaFiles.ViewError.accessDenied(let path) {
+            throw ToolError.accessDenied(path)
         } catch {
             throw ToolError.mediaProblem("The file could not be read: \(error.localizedDescription)")
         }
@@ -319,6 +323,8 @@ public struct WhatsAppTools: Sendable {
             }
         } catch let failure as MediaFiles.ViewError {
             switch failure {
+            case .accessDenied(let path):
+                throw ToolError.accessDenied(path)
             case .unreadable(let detail):
                 throw ToolError.mediaProblem("This attachment could not be opened: \(detail).")
             case .tooManyPixels(let pixels, let limit):
@@ -388,7 +394,7 @@ public struct WhatsAppTools: Sendable {
                 return format.channels(channels, snapshot: snapshot)
             }
         } catch let failure as SnapshotError {
-            throw ToolError.storeFailure(failure.message)
+            throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
         }
@@ -422,7 +428,7 @@ public struct WhatsAppTools: Sendable {
         } catch let refusal as ReadOnlyDatabase.SelectRefusal {
             throw ToolError.queryRefused(refusal.detail)
         } catch let failure as SnapshotError {
-            throw ToolError.storeFailure(failure.message)
+            throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
         }

@@ -34,8 +34,9 @@ public struct Configuration: Sendable, Equatable {
         URL(fileURLWithPath: databasePath).deletingLastPathComponent()
     }
 
-    /// WhatsApp's group container. Not TCC-protected, unlike `~/Library/Messages`, which
-    /// is what makes the whole read path possible with no grant and no prompt.
+    /// WhatsApp's group container. On recent macOS another app's data needs Full Disk Access
+    /// for the program that opens it; without that grant the file can be seen but not read,
+    /// which `SystemWhatsAppStore.availability()` reports as `.accessDenied`.
     public static var defaultDatabasePath: String {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(

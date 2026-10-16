@@ -27,6 +27,16 @@ final class ReadOnlyDatabase {
     struct OpenFailure: Error {
         let code: Int32
         let detail: String
+        /// `errno` from the failed `open(2)`, 0 when SQLite did not get that far.
+        var systemErrno: Int32 = 0
+
+        /// macOS refusing the open — a privacy grant that is missing — as opposed to a file
+        /// that is absent or damaged. Apple's SQLite reports it as `SQLITE_AUTH` ("authorization
+        /// denied") rather than `CANTOPEN`, so the code is checked as well as `errno`.
+        var isPermissionDenied: Bool {
+            [EPERM, EACCES].contains(systemErrno) || code == SQLITE_AUTH || code == SQLITE_PERM
+                || (code & 0xFF) == SQLITE_AUTH || (code & 0xFF) == SQLITE_PERM
+        }
     }
 
     struct QueryFailure: Error {
@@ -53,8 +63,10 @@ final class ReadOnlyDatabase {
             let detail =
                 connection.map { String(cString: sqlite3_errmsg($0)) }
                 ?? String(cString: sqlite3_errstr(code))
+            let systemErrno = connection.map { sqlite3_system_errno($0) } ?? 0
+            let extended = connection.map { sqlite3_extended_errcode($0) } ?? code
             if let connection { sqlite3_close_v2(connection) }
-            throw OpenFailure(code: code, detail: detail)
+            throw OpenFailure(code: extended, detail: detail, systemErrno: systemErrno)
         }
         handle = connection
 

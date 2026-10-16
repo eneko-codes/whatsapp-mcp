@@ -27,7 +27,7 @@ The only `sqlite3_open_v2` in the project that is not `SQLITE_OPEN_READONLY` ope
 
 ## What this is
 
-A local MCP server (Swift 6, stdio transport) for WhatsApp. It reads WhatsApp's databases — the chat store `ChatStorage.sqlite` directly, the rest through the private copies above — and the media files under `Message/`. No network of any kind: no cloud API, no credential, and no model download. Nothing outward-facing, and nothing that changes WhatsApp.
+A local MCP server (Swift 6, stdio transport) for WhatsApp. Reading WhatsApp's container needs Full Disk Access for the program that runs the server on recent macOS (observed on 26 and 27), granted per exact program: an ad-hoc rebuild is a new program and loses it. macOS answers a missing grant with `EPERM` on `open(2)` while `stat` still works, so existence and readability are different facts: `FileAccess.probe` (non-blocking, errno-classified) and `OpenFailure.isPermissionDenied` (`SQLITE_AUTH`, `SQLITE_PERM`, `EPERM`, `EACCES`) turn it into `accessDenied`, never "not found". Do not write, or restore, a sentence saying no permission is needed. It reads WhatsApp's databases — the chat store `ChatStorage.sqlite` directly, the rest through the private copies above — and the media files under `Message/`. No network of any kind: no cloud API, no credential, and no model download. Nothing outward-facing, and nothing that changes WhatsApp.
 
 Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
