@@ -113,8 +113,10 @@ public enum WhatsAppMCPServer {
         // logger writing to stdout would interleave with the JSON-RPC stream and break
         // every response after the first log line.
         ProcessCleanup.shared.installSignalHandlers()
+        Diagnostics.started(version: version)
         try await server.start(transport: StdioTransport())
         await server.waitUntilCompleted()
+        Diagnostics.stopped()
         // The client closed stdin. Work still in flight dies with the process, and its
         // temporary files and ffmpeg would outlive it.
         ProcessCleanup.shared.run()
