@@ -208,6 +208,7 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         let shape = try Self.messageShape(database)
         let profileNames = try Self.profileNames(database)
         let picturePaths = try profilePicturePaths(database)
+        let partners = try Self.partnerAddresses(database)
 
         let sql = """
             \(shape.columns)
@@ -217,7 +218,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         var found: [Message] = []
         try database.query(sql, [.int(id)]) { row in
             found.append(
-                self.message(from: row, profileNames: profileNames, picturePaths: picturePaths))
+                self.message(
+                    from: row, profileNames: profileNames, picturePaths: picturePaths,
+                    partners: partners))
         }
         return try resolvingQuotes(found, database: database, profileNames: profileNames).first
     }
@@ -259,11 +262,14 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         // embedded in ZTEXT, not in any column.
         let profileNames = try Self.profileNames(database)
         let picturePaths = try profilePicturePaths(database)
+        let partners = try Self.partnerAddresses(database)
 
         var rows: [Message] = []
         try database.query(sql, bindings) { row in
             rows.append(
-                self.message(from: row, profileNames: profileNames, picturePaths: picturePaths))
+                self.message(
+                    from: row, profileNames: profileNames, picturePaths: picturePaths,
+                    partners: partners))
         }
         return MessagePage(
             rows: try resolvingQuotes(rows, database: database, profileNames: profileNames),
@@ -380,7 +386,7 @@ public struct SystemWhatsAppStore: WhatsAppStore {
 
     private func message(
         from row: ReadOnlyDatabase.Row, profileNames: [String: String],
-        picturePaths: [String: String]
+        picturePaths: [String: String], partners: [Int64: Set<String>]
     ) -> Message {
         let typeCode = Int(row.int(10))
         let rawText = row.text(9)
@@ -421,7 +427,11 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         func person(_ jid: String) -> Identity {
             // In a one-to-one chat the only other party is the chat itself, and its name is
             // the chat's name; anywhere else an address with no profile name stays an address.
-            let fallback = isIndividual && jid == chatJID ? row.text(2) : nil
+            // The chat's own address is a phone number while the people in it are often written
+            // as a LID, so the chat's address alone does not recognise the other party: the
+            // addresses that party has sent messages from in this chat do.
+            let isPartner = isIndividual && (jid == chatJID || partners[row.int(1)]?.contains(jid) == true)
+            let fallback = isPartner ? row.text(2) : nil
             return Identity(
                 jid: jid,
                 displayName: profileNames[jid].flatMap { $0.isEmpty ? nil : $0 }
@@ -516,6 +526,25 @@ public struct SystemWhatsAppStore: WhatsAppStore {
 
         if typeCode == MessageTypeCode.text { return .text }
         return .other(typeCode: typeCode)
+    }
+
+    /// For each one-to-one chat, every address its other party has sent a message from.
+    ///
+    /// A reaction or a quote names its author by address, and in a one-to-one chat that
+    /// address may be a LID that no profile row names. If the other party has written in the
+    /// same chat from that address, it is them, and the chat's name is theirs.
+    private static func partnerAddresses(_ database: ReadOnlyDatabase) throws -> [Int64: Set<String>] {
+        var partners: [Int64: Set<String>] = [:]
+        try database.query(
+            """
+            SELECT DISTINCT m.ZCHATSESSION, m.ZFROMJID
+            FROM ZWAMESSAGE m JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION
+            WHERE s.ZSESSIONTYPE = 0 AND m.ZISFROMME = 0 AND m.ZFROMJID IS NOT NULL
+            """
+        ) { row in
+            if let jid = row.text(1) { partners[row.int(0), default: []].insert(jid) }
+        }
+        return partners
     }
 
     /// `ZJID → ZPUSHNAME`, the only working name source for a group sender or a mention's

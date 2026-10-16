@@ -4,7 +4,7 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.2.1"
+    public static let version = "1.2.2"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and writes only its own cache, that
