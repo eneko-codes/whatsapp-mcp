@@ -309,7 +309,12 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             FROM ZWAMESSAGE m
             JOIN ZWACHATSESSION s ON s.Z_PK = m.ZCHATSESSION
             LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-            LEFT JOIN ZWAPROFILEPUSHNAME pn ON pn.ZJID = gm.ZMEMBERJID
+            -- One row per JID. Core Data enforces no uniqueness on ZJID, and a second row for
+            -- the same JID would repeat every message of that sender (and inflate the counts
+            -- above them). The newest row, by rowid, is the name that wins — the same one
+            -- `profileNames` keeps — so a name never differs from one tool to the next.
+            LEFT JOIN (SELECT ZJID, ZPUSHNAME, MAX(rowid) FROM ZWAPROFILEPUSHNAME GROUP BY ZJID) pn
+                ON pn.ZJID = gm.ZMEMBERJID
             LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
             \(previewJoin)
             """
@@ -441,7 +446,8 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     /// LID.
     private static func profileNames(_ database: ReadOnlyDatabase) throws -> [String: String] {
         var names: [String: String] = [:]
-        try database.query("SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME") { row in
+        // Oldest first, so when a JID has several rows the newest is the one left standing.
+        try database.query("SELECT ZJID, ZPUSHNAME FROM ZWAPROFILEPUSHNAME ORDER BY rowid") { row in
             if let jid = row.text(0), let name = row.text(1), !name.isEmpty {
                 names[jid] = name
             }
