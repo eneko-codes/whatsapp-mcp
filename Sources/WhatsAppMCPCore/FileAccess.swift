@@ -17,7 +17,10 @@ enum FileAccess: Equatable {
         // O_NONBLOCK: opening a FIFO for reading waits for a writer that never comes, and a
         // probe that can hang a thread forever is worse than the question it answers. A file
         // someone planted in WhatsApp's folder must not be able to do that.
-        let descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        var descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        while descriptor < 0, errno == EINTR {
+            descriptor = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        }
         if descriptor >= 0 {
             close(descriptor)
             return .readable

@@ -38,7 +38,9 @@ public enum DateParsing {
         for options in optionSets {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = options
-            if let moment = formatter.date(from: text) { return moment }
+            // ISO8601DateFormatter is as lenient as Calendar: 2026-02-30T09:00:00+02:00 is 2
+            // March. The day the string names must be a real one, whatever its offset.
+            if let moment = formatter.date(from: text), namesARealDay(text) { return moment }
         }
 
         throw ToolError.badDate(argument: argument, value: text)
@@ -56,6 +58,18 @@ public enum DateParsing {
         let back = calendar.dateComponents([.year, .month, .day], from: date)
         return back.year == components.year && back.month == components.month
             && back.day == components.day
+    }
+
+    /// The leading `YYYY-MM-DD` of an offset-bearing timestamp exists in the Gregorian
+    /// calendar, and its year is one the server accepts.
+    private static func namesARealDay(_ text: String) -> Bool {
+        guard text.count >= 10, let components = dayComponents(String(text.prefix(10))) else {
+            return false
+        }
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        guard let day = utc.date(from: components) else { return false }
+        return sameDay(day, components, utc)
     }
 
     /// `YYYY-MM-DD` and nothing else.
@@ -129,14 +143,26 @@ public enum DateParsing {
             parts.day ?? 0, parts.hour ?? 0, parts.minute ?? 0)
     }
 
-    /// True when another instant within the surrounding two hours shows the same local day
-    /// and clock time — which only happens across a fall-back transition.
+    /// True when another instant shows the same local day and clock time — which happens
+    /// only when the zone's offset drops (clocks go back), by one hour in most zones and by
+    /// thirty minutes in Lord Howe. The candidates are the instants the zone's offsets a day
+    /// either side would give the same wall clock; each is checked.
     static func isAmbiguousLocalTime(_ date: Date, calendar: Calendar) -> Bool {
+        let zone = calendar.timeZone
         func wallClock(_ moment: Date) -> DateComponents {
             calendar.dateComponents([.year, .month, .day, .hour, .minute], from: moment)
         }
         let here = wallClock(date)
-        return [-3600.0, 3600.0].contains { wallClock(date.addingTimeInterval($0)) == here }
+        let current = zone.secondsFromGMT(for: date)
+        let offsets = Set([
+            zone.secondsFromGMT(for: date.addingTimeInterval(-86_400)),
+            zone.secondsFromGMT(for: date.addingTimeInterval(86_400)), current,
+        ])
+        for offset in offsets where offset != current {
+            let other = date.addingTimeInterval(TimeInterval(current - offset))
+            if zone.secondsFromGMT(for: other) == offset, wallClock(other) == here { return true }
+        }
+        return false
     }
 
     static func offsetText(_ date: Date, calendar: Calendar) -> String {

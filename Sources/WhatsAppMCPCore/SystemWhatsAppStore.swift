@@ -311,9 +311,10 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
             -- One row per JID. Core Data enforces no uniqueness on ZJID, and a second row for
             -- the same JID would repeat every message of that sender (and inflate the counts
-            -- above them). The newest row, by rowid, is the name that wins — the same one
+            -- above them). The newest row with a name, by rowid, wins — the same one
             -- `profileNames` keeps — so a name never differs from one tool to the next.
-            LEFT JOIN (SELECT ZJID, ZPUSHNAME, MAX(rowid) FROM ZWAPROFILEPUSHNAME GROUP BY ZJID) pn
+            LEFT JOIN (SELECT ZJID, ZPUSHNAME, MAX(rowid) FROM ZWAPROFILEPUSHNAME
+                       WHERE ZPUSHNAME IS NOT NULL AND ZPUSHNAME <> '' GROUP BY ZJID) pn
                 ON pn.ZJID = gm.ZMEMBERJID
             LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
             \(previewJoin)

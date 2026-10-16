@@ -143,7 +143,7 @@ public struct Format: Sendable {
         lines.append(result.columns.joined(separator: "\t"))
         for row in result.rows {
             lines.append(
-                row.map { $0.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
+                row.map { $0.displaySafe }
                     .joined(separator: "\t"))
         }
         return lines.joined(separator: "\n")
@@ -159,7 +159,9 @@ public struct Format: Sendable {
     public func mediaHeading(_ message: Message, attachment: Attachment) -> String {
         "message \(message.id) · \(MediaKind(attachment.kind).rawValue) · chat \(message.chatName) · "
             + "from \(sender(message)) · \(DateParsing.roundTrip(message.date, calendar: calendar))"
-            + (message.text.map { "\ncaption: \($0)" } ?? "")
+            + (message.text.map {
+                "\ncaption: " + $0.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe
+            } ?? "")
     }
 
     public func mediaMissing(_ message: Message, attachment: Attachment) -> String {

@@ -8,8 +8,9 @@ extension String {
     /// its own line and begin another that looks like `Showing 1–50 of 3` or `NOTE: …`, and a
     /// right-to-left override can make text read in a different order than it is stored.
     /// Line breaks and tabs become spaces; other control characters, the bidirectional
-    /// overrides and isolates, zero-width spaces and the byte-order mark are removed. Joiners
-    /// (U+200C, U+200D) stay: emoji sequences and several scripts need them.
+    /// marks, overrides and isolates, zero-width spaces, invisible operators, soft hyphens,
+    /// tag characters and the byte-order mark are removed. Joiners (U+200C, U+200D) stay:
+    /// emoji sequences and several scripts need them.
     var displaySafe: String {
         var result = String.UnicodeScalarView()
         for scalar in unicodeScalars {
@@ -18,7 +19,11 @@ extension String {
                 result.append(" ")
             case 0x00...0x1F, 0x7F...0x9F:
                 continue
-            case 0x200B, 0x202A...0x202E, 0x2066...0x2069, 0xFEFF:
+            case 0x200B, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069, 0xFEFF,
+                0x2060...0x2064, 0x061C, 0x180E, 0xFFF9...0xFFFB, 0x00AD, 0x034F,
+                0xE0000...0xE007F:
+                // Tag characters (U+E0000...) are the important ones: they spell ASCII that a
+                // person cannot see and a model reads.
                 continue
             default:
                 result.append(scalar)

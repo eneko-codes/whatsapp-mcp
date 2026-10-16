@@ -490,11 +490,20 @@ public struct SnapshotCache: Sendable {
     /// and a power cut run no cleanup, so this is the only thing that ever deletes them.
     static func sweepStaleTemporaries(in directory: URL, now: Date = Date()) {
         let fileManager = FileManager.default
+        func modified(_ url: URL) -> Date? {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        // A scratch directory is touched when files appear in it, not while ffmpeg writes one,
+        // so a long conversion looks old unless what is inside is looked at too.
         func isStale(_ url: URL) -> Bool {
-            guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
-            else { return false }
-            return now.timeIntervalSince(modified) > staleAfter
+            var newest = modified(url)
+            for name in (try? fileManager.contentsOfDirectory(atPath: url.path)) ?? [] {
+                if let inner = modified(url.appendingPathComponent(name)), inner > (newest ?? .distantPast) {
+                    newest = inner
+                }
+            }
+            guard let newest else { return false }
+            return now.timeIntervalSince(newest) > staleAfter
         }
         for name in (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
         where name.contains(".sqlite.tmp-") {
@@ -502,6 +511,10 @@ public struct SnapshotCache: Sendable {
             if isStale(url) { try? fileManager.removeItem(at: url) }
         }
         let scratch = directory.appendingPathComponent("tmp")
+        // Only a real directory: a symlink here would send the sweep into somewhere else.
+        guard (try? fileManager.attributesOfItem(atPath: scratch.path))?[.type] as? FileAttributeType
+            == .typeDirectory
+        else { return }
         for name in (try? fileManager.contentsOfDirectory(atPath: scratch.path)) ?? [] {
             let url = scratch.appendingPathComponent(name)
             if isStale(url) { try? fileManager.removeItem(at: url) }

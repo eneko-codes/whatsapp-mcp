@@ -495,6 +495,24 @@ struct FixtureDatabaseTests {
         #expect(group.messageCount == before.total, "chats_list and chat_get disagree")
     }
 
+    @Test("A newer profile-name row with no name does not blank a sender who has an older one")
+    func emptyNewestProfileNameFallsBackToTheOlderOne() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+
+        var handle: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &handle) == SQLITE_OK)
+        try execute(
+            try #require(handle),
+            "INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES (3, '333@lid', ''), (4, '333@lid', NULL)")
+        sqlite3_close(handle)
+
+        let page = try await store.messages(matching: MessageQuery(chatID: 3))
+        let message = try #require(page.rows.first { $0.id == 30 })
+        #expect(message.sender?.displayName == "Grace Hopper")
+    }
+
     @Test("An empty member name is treated as absent, never shown as a blank sender")
     func emptyMemberNameIsNotABlankSender() async throws {
         let fixture = try makeFixture()

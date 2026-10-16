@@ -94,6 +94,35 @@ struct CleanupTests {
         #expect(FileManager.default.fileExists(atPath: cache.appendingPathComponent("tmp/live-run").path))
     }
 
+    @Test("A symlinked tmp directory is not swept, and a scratch dir with a recent file inside is kept")
+    func sweepIsCareful() throws {
+        let directory = try temporary()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let longAgo = Date().addingTimeInterval(-7200)
+
+        // tmp -> somewhere else, containing an old file the sweep must not touch.
+        let elsewhere = directory.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let precious = elsewhere.appendingPathComponent("precious")
+        try Data("x".utf8).write(to: precious)
+        try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: precious.path)
+        let linkedCache = directory.appendingPathComponent("linked-cache")
+        try FileManager.default.createDirectory(at: linkedCache, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: linkedCache.appendingPathComponent("tmp"), withDestinationURL: elsewhere)
+        SnapshotCache.sweepStaleTemporaries(in: linkedCache)
+        #expect(FileManager.default.fileExists(atPath: precious.path), "the sweep followed a symlink")
+
+        // A conversion that has been running for hours: old directory, fresh output file.
+        let cache = directory.appendingPathComponent("cache")
+        let running = cache.appendingPathComponent("tmp/long-conversion")
+        try FileManager.default.createDirectory(at: running, withIntermediateDirectories: true)
+        try Data("wav".utf8).write(to: running.appendingPathComponent("audio.wav"))
+        try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: running.path)
+        SnapshotCache.sweepStaleTemporaries(in: cache)
+        #expect(FileManager.default.fileExists(atPath: running.path), "a live conversion was swept")
+    }
+
     @Test("The cleanup registry deletes registered files and kills registered children")
     func registryCleans() throws {
         let directory = try temporary()

@@ -24,6 +24,9 @@ struct ArgumentAndDateTests {
         for text in [
             "2026-02-30", "2026-02-31", "2026-04-31", "2025-02-29", "2100-02-29",
             "2026-02-30T10:00", "2026-04-31T23:59:59", "0000-01-01", "1899-12-31", "2201-01-01",
+            // The offset and Z forms go through a different, equally lenient parser.
+            "2026-02-30T09:00:00+02:00", "2026-04-31T09:00:00Z", "2025-02-29T00:00:00+01:00",
+            "0000-01-01T00:00:00Z", "1899-12-31T23:00:00Z", "2026-13-01T00:00:00Z",
         ] {
             #expect(throws: ToolError.badDate(argument: "after", value: text), "\(text)") {
                 try parse(text)
@@ -37,6 +40,24 @@ struct ArgumentAndDateTests {
         #expect(madrid.dateComponents([.month, .day], from: leap).day == 29)
         _ = try parse("2026-12-31T23:59")
         _ = try parse("1900-01-01")
+        _ = try parse("2024-02-29T12:00:00+01:00")
+        _ = try parse("2026-12-31T23:59:59Z")
+    }
+
+    @Test("A zone that goes back by thirty minutes is ambiguous too, and says which half-hour it is")
+    func halfHourFallBack() throws {
+        var lordHowe = Calendar(identifier: .gregorian)
+        lordHowe.timeZone = TimeZone(identifier: "Australia/Lord_Howe")!
+        let first = try DateParsing.parse("2026-04-04T14:45:00Z", argument: "after", calendar: lordHowe)
+        let second = try DateParsing.parse("2026-04-04T15:15:00Z", argument: "after", calendar: lordHowe)
+        let firstText = DateParsing.roundTrip(first, calendar: lordHowe)
+        let secondText = DateParsing.roundTrip(second, calendar: lordHowe)
+        #expect(firstText != secondText, "\(firstText)")
+        #expect(firstText.contains("+") && secondText.contains("+"))
+        #expect(try DateParsing.parse(firstText, argument: "after", calendar: lordHowe) == first)
+        #expect(try DateParsing.parse(secondText, argument: "after", calendar: lordHowe) == second)
+        let ordinary = try DateParsing.parse("2026-04-05T10:00", argument: "after", calendar: lordHowe)
+        #expect(DateParsing.roundTrip(ordinary, calendar: lordHowe) == "2026-04-05T10:00")
     }
 
     @Test("A local time that the spring clock change skips moves to the next valid minute")
@@ -82,10 +103,14 @@ struct ArgumentAndDateTests {
         #expect(try arguments(["from_me": .string("TRUE")]).optionalBool("from_me") == true)
         #expect(try arguments(["from_me": .string(" false ")]).optionalBool("from_me") == false)
         #expect(try arguments([:]).optionalBool("from_me") == nil)
-        #expect(try arguments(["from_me": .string("")]).optionalBool("from_me") == nil)
+        // JSON null means "not set". An empty string does not: it is a filter that got lost.
+        #expect(try arguments(["from_me": .null]).optionalBool("from_me") == nil)
+        #expect(try arguments(["starred_only": .null]).bool("starred_only") == false)
         #expect(try arguments([:]).bool("starred_only") == false)
 
-        for wrong: Value in [.string("yes"), .string("1"), .int(1), .double(0.5), .null, .array([])] {
+        for wrong: Value in [
+            .string("yes"), .string("1"), .string(""), .string("   "), .int(1), .double(0.5), .array([]),
+        ] {
             #expect(throws: ToolError.self, "\(wrong)") {
                 _ = try arguments(["from_me": wrong]).optionalBool("from_me")
             }

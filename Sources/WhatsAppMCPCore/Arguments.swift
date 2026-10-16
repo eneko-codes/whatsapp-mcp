@@ -44,13 +44,14 @@ public struct Arguments {
     /// Nil when absent, which is what separates "only messages I sent" from "any
     /// message". A tri-state has to stay a tri-state.
     public func optionalBool(_ name: String) throws -> Bool? {
-        guard let raw = values[name] else { return nil }
+        // JSON null is how a client says "not set"; an empty or blank string is not — it is
+        // a filter that was meant and got lost, and dropping it widens the answer.
+        guard let raw = values[name], raw != .null else { return nil }
         if let flag = raw.boolValue { return flag }
         if let text = raw.stringValue {
             switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
             case "true": return true
             case "false": return false
-            case "": return nil
             default: break
             }
         }
