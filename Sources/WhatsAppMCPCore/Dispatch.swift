@@ -123,8 +123,8 @@ public struct WhatsAppTools: Sendable {
         var query = ChatQuery()
         query.name = arguments.optionalString("name")
         query.kinds = try arguments.chatKinds("kinds")
-        query.includeArchived = arguments.bool("include_archived")
-        query.includeHidden = arguments.bool("include_hidden")
+        query.includeArchived = try arguments.bool("include_archived")
+        query.includeHidden = try arguments.bool("include_hidden")
         query.limit = try arguments.int(
             "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
         query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
@@ -452,8 +452,8 @@ public struct WhatsAppTools: Sendable {
         var query = MessageQuery()
         query.after = try arguments.optionalDate("after")
         query.before = try arguments.optionalDate("before")
-        query.fromMe = arguments.optionalBool("from_me")
-        query.starredOnly = arguments.bool("starred_only")
+        query.fromMe = try arguments.optionalBool("from_me")
+        query.starredOnly = try arguments.bool("starred_only")
         query.newestFirst = try arguments.newestFirst()
         query.limit = try arguments.int(
             "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
