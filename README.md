@@ -169,7 +169,7 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 ./scripts/pack.sh
 ```
 
-That builds a universal (arm64 + x86_64) release binary and writes
+That builds an arm64 (Apple silicon only) release binary and writes
 `dist/whatsapp-mcp.mcpb`. There is no `Info.plist` embedded; none has been needed so far (see
 [Frameworks and APIs](#frameworks-and-apis)). An ad-hoc signature (the default) is enough to
 run on this Mac; set `MCPB_SIGN_IDENTITY` only if the bundle is meant to run on another one.
