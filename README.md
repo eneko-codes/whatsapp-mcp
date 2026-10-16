@@ -32,8 +32,10 @@ Not affiliated with or endorsed by WhatsApp or Meta.
 
 ## Requirements
 
-- macOS 15 or later
-- Swift 6.0 or later (Xcode 26 ships it)
+- macOS 15 or later to run it. Transcription (`audio_transcribe`) needs macOS 26 or later;
+  everything else works on 15.
+- Xcode 26 or later to build it: the transcription code uses the macOS 26 SDK, so an older
+  SDK does not compile, even though the result runs on macOS 15. Swift 6.0 or later.
 - WhatsApp for Mac, installed and signed in — this server reads its local database and never
   talks to WhatsApp's own servers
 
@@ -68,7 +70,8 @@ not read-only because storing its result is the point; every tool that reads a d
 through a private copy (`db_*`, `calls_list`, `location_sharing_list`, `labels_list`,
 `address_book_list`, `lid_lookup`, `channels_list`) writes that copy, and says when it was
 taken; `media_view` on a video writes a transcript when it is given a `language`. A test walks
-the catalogue and fails if a tool changes what it declares without this list being updated.
+the catalogue and fails if any tool other than `audio_transcribe` stops declaring itself
+read-only; it does not check which tools write the cache, so this paragraph is what says so.
 
 Not covered: WhatsApp **status updates** — the structure of that database could not be
 verified, so there is no tool for it (`db_query` can reach it). There is deliberately no
@@ -93,6 +96,14 @@ Claude Desktop — if macOS asks for Speech Recognition there, grant it.
 
 Not used: FTS or `MATCH`, the blob API, busy handlers, and any network access.
 
+## Databases `db_*` can read
+
+A fixed list, by name — the caller never supplies a path: `ChatStorage`, `ContactsV2`,
+`CallHistory`, `Labels`, `Location`, `Sticker`, `LID`, `emoji`, `LocalKeyValue`,
+`BackedUpKeyValue`, `ExtChatDB`, `statusDB`, `MessagingInfraDB_v2`, `fts` and `channels-fts`.
+Encryption keys (`enc-key.dat`, `Axolotl*`), `BotPKICRL*`, lock files and logs are not on it
+and cannot be reached by any name or path.
+
 ## The cache
 
 `~/Library/Caches/whatsapp-mcp/` holds copies of WhatsApp's databases (refreshed when the
@@ -101,8 +112,9 @@ It is **real message data in plaintext**, readable only by your user, and it sta
 delete it — remove the folder to remove it all. `--cache-directory` moves it. A copy is
 emptied, as it is made, of the key material `db_query` refuses to return (feature keys, media
 keys, the key-value blobs and the protocol queues) and rebuilt so that nothing WhatsApp had
-already deleted survives in it; the rest of each database is copied as it is. This server writes nowhere else: SQLite and the Apple frameworks it calls may use the
-system's temporary files for their own transient work.
+already deleted survives in it; the rest of each database is copied as it is. This server
+writes nowhere else: SQLite and the Apple frameworks it calls may use the system's temporary
+files for their own transient work.
 
 ## Prerequisites for transcription
 
@@ -235,7 +247,11 @@ invented, never a copy of anything real. One more test runs macOS's real recogni
 synthesised by `say`; it is off unless `WHATSAPP_MCP_SPEECH_TESTS=1`. See `CLAUDE.md`, whose
 hard rule at the top is what makes that non-negotiable.
 
-Manual verification against a real WhatsApp database is the owner's job.
+Manual verification against a real WhatsApp database is the owner's job, and is done on a
+copy: put a copy of `ChatStorage.sqlite` (and, for attachments, the files it names under
+`Message/`) in a temporary directory and start the server with `--database <that copy>` and
+`--cache-directory <another temporary directory>`, so neither the live container nor the real
+cache is touched. Delete both afterwards.
 
 ## Licence
 
