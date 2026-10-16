@@ -4,7 +4,7 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.2.0"
+    public static let version = "1.2.1"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and writes only its own cache, that
@@ -113,8 +113,10 @@ public enum WhatsAppMCPServer {
         // logger writing to stdout would interleave with the JSON-RPC stream and break
         // every response after the first log line.
         ProcessCleanup.shared.installSignalHandlers()
+        Diagnostics.started(version: version)
         try await server.start(transport: StdioTransport())
         await server.waitUntilCompleted()
+        Diagnostics.stopped()
         // The client closed stdin. Work still in flight dies with the process, and its
         // temporary files and ffmpeg would outlive it.
         ProcessCleanup.shared.run()
