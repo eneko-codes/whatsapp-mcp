@@ -123,8 +123,8 @@ files for their own transient work.
 ## Logs
 
 The server writes one line per event to stderr, which Claude Desktop captures in
-`~/Library/Logs/Claude/mcp-server-<name>.log`: start and stop, each tool call with its outcome
-and duration, and the kind of any error. A line never carries an argument, a result, a message,
+`~/Library/Logs/Claude/mcp-server-<name>.log`: the start, and each failed tool call with the
+kind of its error and its duration. A line never carries an argument, a result, a message,
 a name, a path or an identifier — nothing in the logging API accepts free text, so none can be
 added by accident. Look there first when a tool misbehaves; `whatsapp_status` covers whether
 the database can be read.
