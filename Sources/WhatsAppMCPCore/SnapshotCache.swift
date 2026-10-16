@@ -252,12 +252,30 @@ public struct SnapshotCache: Sendable {
     {
         let fileManager = FileManager.default
         try PrivateDirectory.ensure(cacheDirectory)
+        Self.sweepStaleTemporaries(in: cacheDirectory)
 
         let temporary = cacheDirectory.appendingPathComponent(
             "\(database.cacheFileName).tmp-\(UUID().uuidString)")
         // The scrubbed copy is rebuilt into this second file, so the first — which still
         // holds the keys in its free pages — never becomes the cache.
         let rebuilt = URL(fileURLWithPath: temporary.path + ".rebuilt")
+
+        // Owner-only from the first byte. `sqlite3_open_v2` would create these with the
+        // umask's 0644, and the first of them is the raw backup — keys and all — for as long
+        // as the scrub takes. Created empty here, SQLite opens and keeps the existing mode
+        // (and gives its journal the same one).
+        guard fileManager.createFile(
+            atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        else { throw SnapshotError.copyFailed(database, "could not create \(temporary.lastPathComponent)") }
+        // `rebuilt` cannot be pre-created: `VACUUM INTO` refuses an output file that exists,
+        // even an empty one. It is made owner-only by a restrictive umask around that one
+        // statement instead (see `PrivateUmask`).
+        ProcessCleanup.shared.register(path: temporary.path)
+        ProcessCleanup.shared.register(path: rebuilt.path)
+        defer {
+            ProcessCleanup.shared.unregister(path: temporary.path)
+            ProcessCleanup.shared.unregister(path: rebuilt.path)
+        }
         // The backup copies WhatsApp's "WAL mode" header into the new file, so SQLite creates
         // `-shm` and `-wal` beside it while it is open. Remove them with the temporary.
         defer {
@@ -328,8 +346,10 @@ public struct SnapshotCache: Sendable {
             // directory.
             var rebuildError: UnsafeMutablePointer<CChar>?
             let escaped = rebuilt.path.replacingOccurrences(of: "'", with: "''")
-            guard sqlite3_exec(destinationHandle, "VACUUM INTO '\(escaped)'", nil, nil, &rebuildError) == SQLITE_OK
-            else {
+            let rebuiltCode = PrivateUmask.run {
+                sqlite3_exec(destinationHandle, "VACUUM INTO '\(escaped)'", nil, nil, &rebuildError)
+            }
+            guard rebuiltCode == SQLITE_OK else {
                 let detail = rebuildError.map { String(cString: $0) } ?? "unknown"
                 sqlite3_free(rebuildError)
                 throw fail("the cleaned copy could not be rebuilt: \(detail)")
@@ -413,6 +433,36 @@ public struct SnapshotCache: Sendable {
                 else { continue }
                 try exec("UPDATE \(quoted(table)) SET \(quoted(actual)) = NULL")
             }
+        }
+    }
+
+    // MARK: Leftovers
+
+    /// How old a temporary must be before it is taken for a dead process's. Another instance
+    /// may be mid-copy in the same directory, and a copy touches its file continuously, so
+    /// anything modified within the last hour is left alone.
+    static let staleAfter: TimeInterval = 3600
+
+    /// Removes what a killed process left in the cache: `<Name>.sqlite.tmp-<uuid>` (the raw,
+    /// unscrubbed backup, and its `.rebuilt`) and `tmp/<uuid>` scratch directories. `SIGKILL`
+    /// and a power cut run no cleanup, so this is the only thing that ever deletes them.
+    static func sweepStaleTemporaries(in directory: URL, now: Date = Date()) {
+        let fileManager = FileManager.default
+        func isStale(_ url: URL) -> Bool {
+            guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            else { return false }
+            return now.timeIntervalSince(modified) > staleAfter
+        }
+        for name in (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
+        where name.contains(".sqlite.tmp-") {
+            let url = directory.appendingPathComponent(name)
+            if isStale(url) { try? fileManager.removeItem(at: url) }
+        }
+        let scratch = directory.appendingPathComponent("tmp")
+        for name in (try? fileManager.contentsOfDirectory(atPath: scratch.path)) ?? [] {
+            let url = scratch.appendingPathComponent(name)
+            if isStale(url) { try? fileManager.removeItem(at: url) }
         }
     }
 }

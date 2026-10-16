@@ -107,7 +107,11 @@ public enum WhatsAppMCPServer {
         // The default StdioTransport logger is a no-op handler. Leave it that way: a
         // logger writing to stdout would interleave with the JSON-RPC stream and break
         // every response after the first log line.
+        ProcessCleanup.shared.installSignalHandlers()
         try await server.start(transport: StdioTransport())
         await server.waitUntilCompleted()
+        // The client closed stdin. Work still in flight dies with the process, and its
+        // temporary files and ffmpeg would outlive it.
+        ProcessCleanup.shared.run()
     }
 }

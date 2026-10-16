@@ -171,6 +171,8 @@ public struct FFmpegConverter: Sendable {
             throw TranscriptionError.conversionFailed(error.localizedDescription)
         }
         let running = RunningProcess(process)
+        ProcessCleanup.shared.register(child: process)
+        defer { ProcessCleanup.shared.unregister(child: process) }
 
         // Cancelling the request must stop ffmpeg: the scratch directory is deleted when
         // this call unwinds, and a process still writing into it would be left behind.
@@ -270,7 +272,11 @@ public struct TranscriptionService: Sendable {
 
         let scratch = cacheDirectory.appendingPathComponent("tmp/\(UUID().uuidString)")
         try makePrivateDirectory(scratch)
-        defer { try? FileManager.default.removeItem(at: scratch) }
+        ProcessCleanup.shared.register(path: scratch.path)
+        defer {
+            ProcessCleanup.shared.unregister(path: scratch.path)
+            try? FileManager.default.removeItem(at: scratch)
+        }
 
         let (audio, duration) = try await readableAudio(from: url, scratch: scratch)
         let segments = try await engine.transcribe(audio: audio, locale: locale)

@@ -21,6 +21,8 @@ The read path takes a database path, so the gentle route is a copy of the store 
 - **Transcripts** (`transcripts/<sha256>-<language>.json`), so the same audio is recognised once. `media_view` on a video writes one too when it is given a `language`.
 - **A scratch directory** (`tmp/<uuid>/`) for the WAV `ffmpeg` produces, deleted when the call ends. A process killed mid-call can leave one behind; it is safe to delete.
 
+Nothing in the cache is world-readable at any moment: the raw backup (`.sqlite.tmp-<uuid>`, which holds keys until the scrub finishes) is created `0600` before SQLite touches it, the rebuilt copy is created under a restrictive `umask` (`PrivateUmask`: `VACUUM INTO` refuses a pre-created output file, so it cannot be made `0600` in advance), and `ProcessCleanup` deletes registered temporaries and kills `ffmpeg` on `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGPIPE` and when stdin closes. `SIGKILL` cannot be handled, so each copy first sweeps temporaries older than an hour (younger ones may be another instance's).
+
 This is **real message data, in plaintext, kept until the owner deletes it** — not a scratch space. Directories this server creates are `0700` and its files `0600`; a directory that already existed keeps its mode, because it is not this server's to change. Never print, commit or attach its contents, and never use it for debugging. A new write location, or a new kind of thing kept there, means amending this section first.
 
 The only `sqlite3_open_v2` in the project that is not `SQLITE_OPEN_READONLY` opens the temporary file a copy is being written to inside that directory.
