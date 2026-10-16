@@ -356,11 +356,11 @@ public struct WhatsAppTools: Sendable {
                 query.limit = limit
                 query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
                 let (calls, snapshot) = try reader.calls(matching: query)
-                return format.calls(calls, snapshot: snapshot)
+                return format.calls(calls, snapshot: snapshot, limit: limit, offset: query.offset)
 
             case ToolCatalog.locationSharingName:
                 let (sharing, snapshot) = try reader.locationSharing(limit: limit)
-                return format.locationSharing(sharing, snapshot: snapshot)
+                return format.locationSharing(sharing, snapshot: snapshot, limit: limit)
 
             case ToolCatalog.labelsName:
                 if let id = try arguments.optionalInt("label_id") {
@@ -370,7 +370,7 @@ public struct WhatsAppTools: Sendable {
                         throw ToolError.badArgument(
                             name: "label_id", reason: "no label has id \(id); call labels_list without it")
                     }
-                    return format.labeledEntities(entities, label: label, snapshot: snapshot)
+                    return format.labeledEntities(entities, label: label, snapshot: snapshot, limit: limit)
                 }
                 let (labels, snapshot) = try reader.labels()
                 return format.labels(labels, snapshot: snapshot)
@@ -381,7 +381,7 @@ public struct WhatsAppTools: Sendable {
                 query.limit = limit
                 query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
                 let (entries, snapshot) = try reader.addressBook(matching: query)
-                return format.addressBook(entries, snapshot: snapshot)
+                return format.addressBook(entries, snapshot: snapshot, limit: limit, offset: query.offset)
 
             case ToolCatalog.lidLookupName:
                 let value = try arguments.requiredString("value")
@@ -391,7 +391,7 @@ public struct WhatsAppTools: Sendable {
             default:
                 let (channels, snapshot) = try reader.channels(
                     name: arguments.optionalString("name"), limit: limit)
-                return format.channels(channels, snapshot: snapshot)
+                return format.channels(channels, snapshot: snapshot, limit: limit)
             }
         } catch let failure as SnapshotError {
             throw failure.toolError
