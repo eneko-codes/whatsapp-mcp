@@ -106,6 +106,7 @@ public struct Format: Sendable {
         lines.append("  no disappearing-message setting or TTL, per chat or per message")
         lines.append("  no recoverable text for a deleted message, and no link to what it replaced")
         lines.append("  no meaning for a delivery code: the number is stored, the wording is not")
+        lines.append("  no record of who starred a message or when: a star is a yes/no flag on the message")
 
         return lines.joined(separator: "\n")
     }
@@ -506,6 +507,43 @@ public struct Format: Sendable {
             }
         }
 
+        if let quote = message.quote {
+            lines.append("")
+            var heading = "replies to:"
+            if let id = quote.localMessageID {
+                heading += " message \(id)"
+            } else {
+                heading += " a message that is not on this Mac"
+            }
+            if quote.quotedIsFromMe == true {
+                heading += " (you)"
+            } else if let author = quote.author {
+                heading += " (\(author.displayName)  \(author.jid))"
+            }
+            lines.append(heading)
+            if let text = quote.text, !text.isEmpty {
+                lines.append(text.quotedBlock)
+            } else {
+                lines.append("  (the quote carries no words)")
+            }
+        }
+        if !message.reactions.isEmpty {
+            lines.append("")
+            lines.append("reactions:")
+            for reaction in message.reactions {
+                var line = "  \(reaction.emoji)  "
+                if let reactor = reaction.reactor {
+                    line += "\(reactor.displayName)  \(reactor.jid)"
+                } else {
+                    line += "reactor not recorded in this entry"
+                }
+                if let date = reaction.date {
+                    line += "  \(DateParsing.roundTrip(date, calendar: calendar))"
+                }
+                lines.append(line)
+            }
+        }
+
         lines.append("")
         lines.append(contentsOf: bodyDetail(message.body))
 
@@ -718,6 +756,12 @@ public struct Format: Sendable {
             if let url = preview.url { line += "  → \(url)" }
             if let title = preview.title { line += " — \"\(title)\"" }
         }
+        if let quote = message.quote {
+            line += quote.localMessageID.map { "  ↩\($0)" } ?? "  ↩"
+        }
+        if !message.reactions.isEmpty {
+            line += "  [" + message.reactions.map(\.emoji).joined(separator: " ") + "]"
+        }
         if message.isStarred { line += "  ★" }
         return line
     }
@@ -735,6 +779,16 @@ public struct Format: Sendable {
                 "An attachment shown without a path is not on this Mac. WhatsApp evicts "
                     + "the file and keeps the record, so that is the ordinary case — the "
                     + "message itself is not gone.")
+        }
+        if rows.contains(where: { $0.quote != nil }) {
+            notes.append("")
+            notes.append(
+                "↩N is a reply to message N of the same chat; ↩ alone is a reply whose "
+                    + "original is not on this Mac. message_get shows the quoted words.")
+        }
+        if rows.contains(where: { !$0.reactions.isEmpty }) {
+            notes.append("")
+            notes.append("[😮 ❤️] lists the reactions on a message; message_get says who.")
         }
         return notes
     }

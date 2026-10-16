@@ -504,12 +504,17 @@ public struct Message: Sendable, Equatable {
     /// Everyone named with `@` in `text`, resolved where this database can. Listed as well
     /// as inlined, so "was I mentioned" is answerable without parsing the line back apart.
     public let mentions: [Mention]
+    /// The message this one replies to, when it replies to one.
+    public let quote: Quote?
+    /// Emoji reactions on this message, oldest first.
+    public let reactions: [Reaction]
 
     public init(
         id: Int64, chatID: Int64, chatName: String, date: Date, sentDate: Date? = nil,
         isFromMe: Bool, sender: Identity?, isStarred: Bool = false,
         delivery: DeliveryState = DeliveryState(rawCode: 0, errorCode: nil),
-        body: MessageBody, text: String? = nil, mentions: [Mention] = []
+        body: MessageBody, text: String? = nil, mentions: [Mention] = [],
+        quote: Quote? = nil, reactions: [Reaction] = []
     ) {
         self.id = id
         self.chatID = chatID
@@ -523,6 +528,16 @@ public struct Message: Sendable, Equatable {
         self.body = body
         self.text = text
         self.mentions = mentions
+        self.quote = quote
+        self.reactions = reactions
+    }
+
+    /// The same message with its quote filled in once the quoted message has been looked up.
+    func replacingQuote(_ quote: Quote?) -> Message {
+        Message(
+            id: id, chatID: chatID, chatName: chatName, date: date, sentDate: sentDate,
+            isFromMe: isFromMe, sender: sender, isStarred: isStarred, delivery: delivery,
+            body: body, text: text, mentions: mentions, quote: quote, reactions: reactions)
     }
 }
 

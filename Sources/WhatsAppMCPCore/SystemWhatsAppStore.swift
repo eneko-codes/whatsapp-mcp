@@ -214,12 +214,12 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             \(shape.source)
             WHERE m.Z_PK = ?
             """
-        var found: Message?
+        var found: [Message] = []
         try database.query(sql, [.int(id)]) { row in
-            found = self.message(
-                from: row, profileNames: profileNames, picturePaths: picturePaths)
+            found.append(
+                self.message(from: row, profileNames: profileNames, picturePaths: picturePaths))
         }
-        return found
+        return try resolvingQuotes(found, database: database, profileNames: profileNames).first
     }
 
     private func page(matching query: MessageQuery, requiringMediaRow: Bool) async throws
@@ -265,7 +265,46 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             rows.append(
                 self.message(from: row, profileNames: profileNames, picturePaths: picturePaths))
         }
-        return MessagePage(rows: rows, total: total)
+        return MessagePage(
+            rows: try resolvingQuotes(rows, database: database, profileNames: profileNames),
+            total: total)
+    }
+
+    /// Looks the quoted messages up in one query for the whole page, scoped to each
+    /// message's own chat, and returns the messages with who and where they quoted.
+    ///
+    /// Done after the page is read rather than in SQL because the quoted id is inside a
+    /// blob. A quote whose original is not on this Mac keeps what WhatsApp copied into the
+    /// reply.
+    private func resolvingQuotes(
+        _ messages: [Message], database: ReadOnlyDatabase, profileNames: [String: String]
+    ) throws -> [Message] {
+        let stanzas = Set(messages.compactMap { $0.quote?.stanzaID })
+        guard !stanzas.isEmpty else { return messages }
+
+        var local: [String: (id: Int64, fromMe: Bool)] = [:]
+        let ordered = stanzas.sorted()
+        // SQLite caps bound variables far above a page of 200, but a chunk keeps the
+        // statement small however the page size is raised.
+        for start in stride(from: 0, to: ordered.count, by: 100) {
+            let chunk = Array(ordered[start..<min(start + 100, ordered.count)])
+            let marks = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            try database.query(
+                "SELECT ZSTANZAID, ZCHATSESSION, Z_PK, ZISFROMME FROM ZWAMESSAGE WHERE ZSTANZAID IN (\(marks))",
+                chunk.map { .text($0) }
+            ) { row in
+                guard let stanza = row.text(0) else { return }
+                local["\(row.int(1))|\(stanza)"] = (row.int(2), row.bool(3))
+            }
+        }
+        return messages.map { message in
+            guard let quote = message.quote else { return message }
+            guard let found = local["\(message.chatID)|\(quote.stanzaID)"] else { return message }
+            return message.replacingQuote(
+                Quote(
+                    stanzaID: quote.stanzaID, localMessageID: found.id,
+                    quotedIsFromMe: found.fromMe, author: quote.author, text: quote.text))
+        }
     }
 
     /// The column list and the FROM/JOIN block, built together so their indices cannot
@@ -280,6 +319,13 @@ public struct SystemWhatsAppStore: WhatsAppStore {
     {
         let present = try database.tableNames()
         let hasPreviews = present.contains("ZWAMESSAGEDATAITEM")
+        // Quotes and reactions live in blobs that a WhatsApp version may not have: a missing
+        // table or column costs those two fields, never the read.
+        let hasMetadata = try database.columnNames(of: "ZWAMEDIAITEM").contains("ZMETADATA")
+        let hasReceipts =
+            try present.contains("ZWAMESSAGEINFO")
+            && database.columnNames(of: "ZWAMESSAGE").contains("ZMESSAGEINFO")
+            && database.columnNames(of: "ZWAMESSAGEINFO").contains("ZRECEIPTINFO")
 
         let columns = """
             -- ZPUSHNAME is deliberately not selected. It once held the name a sender chose
@@ -294,7 +340,10 @@ public struct SystemWhatsAppStore: WhatsAppStore {
                    mi.ZMEDIALOCALPATH, mi.ZFILESIZE, mi.ZMOVIEDURATION, mi.ZTITLE,
                    mi.ZLATITUDE, mi.ZLONGITUDE, mi.ZVCARDNAME, mi.ZVCARDSTRING,
                    mi.ZMEDIAORIGIN, mi.ZMEDIAURL, mi.ZAUTHORNAME,
-                   \(hasPreviews ? "di.ZCONTENT1, di.ZTITLE, di.ZSUMMARY" : "NULL, NULL, NULL")
+                   \(hasPreviews ? "di.ZCONTENT1, di.ZTITLE, di.ZSUMMARY" : "NULL, NULL, NULL"),
+                   \(hasMetadata ? "mi.ZMETADATA" : "NULL"),
+                   \(hasReceipts ? "inf.ZRECEIPTINFO" : "NULL"),
+                   s.ZSESSIONTYPE, s.ZCONTACTJID
             """
 
         // ZWAMESSAGEDATAITEM holds up to 12 rows for one message, one per link in it.
@@ -304,6 +353,11 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         let previewJoin =
             hasPreviews
             ? "LEFT JOIN ZWAMESSAGEDATAITEM di ON di.ZMESSAGE = m.Z_PK AND di.ZINDEX = 0" : ""
+
+        // One info row per message (ZMESSAGEINFO is the message's own foreign key), so this
+        // join cannot repeat a message.
+        let receiptJoin =
+            hasReceipts ? "LEFT JOIN ZWAMESSAGEINFO inf ON inf.Z_PK = m.ZMESSAGEINFO" : ""
 
         let source = """
             FROM ZWAMESSAGE m
@@ -318,6 +372,7 @@ public struct SystemWhatsAppStore: WhatsAppStore {
                 ON pn.ZJID = gm.ZMEMBERJID
             LEFT JOIN ZWAMEDIAITEM mi ON mi.Z_PK = m.ZMEDIAITEM
             \(previewJoin)
+            \(receiptJoin)
             """
 
         return (columns, source)
@@ -361,6 +416,24 @@ public struct SystemWhatsAppStore: WhatsAppStore {
                 jid: jid, displayName: name, profilePicturePath: picturePaths[jid])
         }
 
+        let isIndividual = row.optionalInt(31) == 0
+        let chatJID = row.text(32)
+        func person(_ jid: String) -> Identity {
+            // In a one-to-one chat the only other party is the chat itself, and its name is
+            // the chat's name; anywhere else an address with no profile name stays an address.
+            let fallback = isIndividual && jid == chatJID ? row.text(2) : nil
+            return Identity(
+                jid: jid,
+                displayName: profileNames[jid].flatMap { $0.isEmpty ? nil : $0 }
+                    ?? fallback ?? JIDDisplay.render(jid, profileNames: profileNames),
+                profilePicturePath: picturePaths[jid])
+        }
+        let quote = MessageExtras.quote(in: row.data(29)).map {
+            Quote(
+                stanzaID: $0.stanzaID, author: $0.participant.map(person), text: $0.text)
+        }
+        let reactions = MessageExtras.reactions(in: row.data(30), resolve: person)
+
         return Message(
             id: row.int(0),
             chatID: row.int(1),
@@ -376,7 +449,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
                 from: row, typeCode: typeCode, rawText: rawText, profileNames: profileNames,
                 picturePaths: picturePaths),
             text: text,
-            mentions: mentions)
+            mentions: mentions,
+            quote: quote,
+            reactions: reactions)
     }
 
     /// Decides what a message *is*, once, against the type gates each case documents.

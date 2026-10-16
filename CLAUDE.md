@@ -46,6 +46,7 @@ Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 - Any network access, including a speech-model download: a locale that is supported but not installed is reported, never fetched.
 - A language fallback. A language the speech engine lacks (Basque, Catalan) is an error, never a transcript in another language.
 - **What can never be read**, by any tool, whatever it is called: `enc-key.dat`, `Axolotl*.sqlite`, Signal key material, `BotPKICRL*`, `*.lock`, `Logs`. Databases are an allow-list (`AllowedDatabase`), not a deny-list, and the caller names one, never a path. Inside the allowed databases, `blockedReads` refuses key columns and raw protocol queues at prepare time.
+- Reactions (`ZWAMESSAGEINFO.ZRECEIPTINFO`, repeated field 7) and quotes (`ZWAMEDIAITEM.ZMETADATA`, fields 5, 6 and 19) are protocol-buffers blobs with no published schema; `MessageExtras` names the field numbers it was checked against and a blob it does not recognise yields nothing, never a guess. A reaction entry with no address is reported as "reactor not recorded", not as the owner. A star is a yes/no flag: who and when are not stored.
 - The schema is WhatsApp's private storage, undocumented and free to change in any update. Readers name the tables and columns they need, taken from the real `.schema`, and a missing one is reported as a changed schema. If a check fails, say the reads are wrong — not that there are no messages.
 
 ## Commands
