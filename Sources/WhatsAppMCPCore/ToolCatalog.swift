@@ -403,7 +403,8 @@ public enum ToolCatalog {
 
             The result is an automatic transcription and can contain errors. Results are \
             kept in ~/Library/Caches/whatsapp-mcp so the same audio is recognised once. \
-            WhatsApp voice notes are Ogg Opus, which needs ffmpeg installed to convert.
+            Voice notes, MP3 and M4A open directly; a video's sound track and other containers \
+            need ffmpeg installed, and only plain audio or video containers are handed to it.
             """,
         inputSchema: object(properties: [
             "message_id": integer(

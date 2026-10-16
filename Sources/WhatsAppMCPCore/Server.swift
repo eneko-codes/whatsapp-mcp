@@ -50,8 +50,9 @@ public enum WhatsAppMCPServer {
         macOS, on this Mac, and can be wrong. It needs the language spoken, as a full tag \
         (es-ES, en-US; a bare language only when it has a single model): macOS cannot detect it, and Basque (eu) and Catalan (ca) were not in its list when \
         this was written — the tool says what the engine offers rather than guessing in \
-        another language. WhatsApp \
-        voice notes are Ogg Opus and need ffmpeg installed to be converted.
+        another language. macOS opens \
+        WhatsApp's Ogg Opus voice notes, MP3 and M4A itself; a video's sound track and \
+        containers it cannot open (Matroska, for one) need ffmpeg installed.
 
         WHAT IS NOT IN THE CHAT DATABASE, and is absent from WhatsApp's own storage rather \
         than missed by these tools: a mapping from a …@lid address to a phone number there \

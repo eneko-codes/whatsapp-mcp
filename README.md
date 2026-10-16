@@ -93,7 +93,7 @@ installed bundle under Claude Desktop. If macOS ever asks for Speech Recognition
 | `Speech` — `SpeechAnalyzer`, `SpeechTranscriber` (macOS 26+) | On-device transcription; no server path, no model download | [Speech](https://developer.apple.com/documentation/speech) |
 | `AVFoundation`, `ImageIO`, `PDFKit` | Video frames, image reduction, PDF text | — |
 | `CryptoKit`, `UniformTypeIdentifiers` | SHA-256 and MIME types | — |
-| `ffmpeg` (subprocess, local file only) | Converting Ogg Opus voice notes, which macOS cannot open | [ffmpeg](https://ffmpeg.org/) |
+| `ffmpeg` (subprocess, one local file, format pinned by its first bytes) | A video's sound track and containers macOS cannot open; never Ogg Opus voice notes, MP3 or M4A, which `AVAudioFile` opens itself (checked on macOS 27) | [ffmpeg](https://ffmpeg.org/) |
 
 Not used: FTS or `MATCH`, the blob API, busy handlers, and any network access.
 
@@ -122,7 +122,11 @@ files for their own transient work.
 - macOS 26 or later, and the speech model for your language installed (System Settings →
   Keyboard → Dictation). A language that is supported but not installed is reported; nothing is
   downloaded.
-- `ffmpeg` for WhatsApp voice notes: `brew install ffmpeg`, or `--ffmpeg /path/to/ffmpeg`.
+- `ffmpeg`, only for a video's sound track and containers macOS cannot open (WhatsApp's own
+  Ogg Opus voice notes, MP3 and M4A open without it): `brew install ffmpeg`, or
+  `--ffmpeg /path/to/ffmpeg`. It is run on one file whose format is decided here from its first
+  bytes and passed with `-f`; a playlist or any other file is refused, because a playlist can
+  name other files for ffmpeg to read.
 - Basque and Catalan were not in the engine's list when this was written, and macOS does not
   detect the language, so `audio_transcribe` requires one; the error lists what the engine
   offers. A bare language (`es`) is accepted only when there is a single model for it, never
@@ -207,7 +211,7 @@ one keeps answering.
 
 Call `whatsapp_status`. It says `readable` when macOS lets the server open WhatsApp's database;
 `ACCESS DENIED` means Full Disk Access is missing (see [Permissions](#permissions)) and `NOT
-FOUND` means the file is not there — open WhatsApp for Mac at least once. For voice notes, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
+FOUND` means the file is not there — open WhatsApp for Mac at least once. For a video's sound, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
 
 ## Tool switches
 
@@ -216,8 +220,8 @@ because the manifest declares them all. No tool changes WhatsApp, so there is no
 can turn on anything destructive. Two switches are worth knowing: `db_query` reaches any
 allow-listed database, and `audio_transcribe` is the one that declares it writes its cache.
 
-Reading needs no configuration. Voice-note transcription needs `ffmpeg` and the speech model
-for your language (see above); `--ffmpeg` and `--cache-directory` exist for manual runs.
+Reading needs no configuration. Transcription needs the speech model for your language, and
+`ffmpeg` for a video's sound (see above); `--ffmpeg` and `--cache-directory` exist for manual runs.
 
 ## Manual registration instead
 

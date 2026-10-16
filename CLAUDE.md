@@ -35,7 +35,7 @@ Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
 - [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against WhatsApp's own databases, opened read-only and immutable through a [URI filename](https://www.sqlite.org/uri.html); `sqlite3_create_function_v2` for accent- and case-insensitive matching; `sqlite3_backup_*` for the cache copies; `sqlite3_set_authorizer` to refuse reads of key material in `db_query`; a progress handler and `SQLITE_LIMIT_LENGTH` to bound it.
 - Apple frameworks, none of which needs a TCC permission as far as has been observed: `Speech` (`SpeechAnalyzer`/`SpeechTranscriber`, macOS 26 and later, on-device only), `AVFoundation`, `ImageIO`, `PDFKit`, `CryptoKit`, `UniformTypeIdentifiers`.
-- One local subprocess, `ffmpeg` (Homebrew's prefixes or `--ffmpeg`), run on a single file with `-protocol_whitelist file`, to convert Ogg Opus, which macOS cannot open.
+- One local subprocess, `ffmpeg` (Homebrew's prefixes or `--ffmpeg`), for a video's sound track and containers `AVAudioFile` cannot open — it opens Ogg Opus, MP3 and M4A itself, so those never reach ffmpeg. It runs on one file with `-protocol_whitelist file`, and **the demuxer is never left to ffmpeg**: `MediaFormat` decides it from the first bytes, ffmpeg is told with `-f`, and anything else (a playlist, `.ffconcat`, `.sdp`) is refused before it starts — a playlist names other files that ffmpeg would read. Do not remove that.
 
 ## Surface not used
 

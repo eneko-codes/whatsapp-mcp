@@ -35,6 +35,8 @@ public enum TranscriptionError: Error, Equatable {
     case engineUnavailable(String)
     case converterMissing
     case conversionFailed(String)
+    /// The file is not a plain audio or video container ffmpeg may be pointed at.
+    case unsupportedFormat
     case unreadable(String)
     case tooLarge(Int64)
 
@@ -79,8 +81,9 @@ public enum TranscriptionError: Error, Equatable {
 
         case .converterMissing:
             return """
-                This audio is in a format macOS cannot open on its own — WhatsApp voice notes \
-                are Ogg Opus — and ffmpeg, which converts it, was not found.
+                This file is in a format macOS cannot open on its own (macOS opens Ogg Opus voice \
+                notes, MP3 and M4A itself; a video's sound track and some other containers need \
+                a converter), and ffmpeg was not found.
 
                 Install it with `brew install ffmpeg`, or point this server at it with \
                 `--ffmpeg /path/to/ffmpeg`. It runs locally, on this one file, with no network.
@@ -88,6 +91,15 @@ public enum TranscriptionError: Error, Equatable {
 
         case .conversionFailed(let detail):
             return "ffmpeg could not convert the audio: \(detail)"
+
+        case .unsupportedFormat:
+            return """
+                This file is not in an audio or video format this server will hand to ffmpeg.
+                Only plain containers recognised by their first bytes are converted (Ogg,
+                MP4/M4A/QuickTime, WAV, MP3, AAC, FLAC, AIFF, CAF, AMR, Matroska); a playlist
+                or any other file is refused, because such a file can name other files for
+                ffmpeg to read.
+                """
 
         case .unreadable(let detail):
             return "The audio could not be read: \(detail)"
@@ -124,14 +136,22 @@ public struct FFmpegConverter: Sendable {
     }
 
     public func convert(_ input: URL, to output: URL) async throws {
+        // Decided here, before anything is started: `-f` names the demuxer so ffmpeg never
+        // sniffs the content itself (see `MediaFormat`), and a file that is not a plain
+        // container never reaches it.
+        guard let demuxer = MediaFormat.ffmpegDemuxer(for: input) else {
+            throw TranscriptionError.unsupportedFormat
+        }
         let process = Process()
         process.executableURL = executable
-        // `-protocol_whitelist file` keeps ffmpeg to local files whatever the input names;
-        // `-nostdin` stops it waiting on a terminal that does not exist; `-vn` drops a
-        // video track so a clip is read for its sound only.
+        // `-f <demuxer>` before `-i` pins the format; `-protocol_whitelist file` keeps ffmpeg
+        // to local files; `file:` makes the path a path even if it began with a dash;
+        // `-nostdin` stops it waiting on a terminal that does not exist; `-map 0:a:0` and
+        // `-vn` read the first audio stream only, so a clip is used for its sound.
         process.arguments = [
             "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file",
-            "-i", input.path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "-y", output.path,
+            "-f", demuxer, "-i", "file:" + input.path, "-map", "0:a:0", "-vn", "-ac", "1",
+            "-ar", "16000", "-f", "wav", "-y", output.path,
         ]
         let errors = Pipe()
         process.standardError = errors
