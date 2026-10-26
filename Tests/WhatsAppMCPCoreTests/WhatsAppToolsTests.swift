@@ -141,7 +141,7 @@ struct WhatsAppToolsTests {
         let store = stocked()
         store.info = DatabaseInfo(
             path: "/invented/ChatStorage.sqlite", exists: true, size: 1024, modified: nil,
-            hasPendingWAL: false, missingTables: [],
+            missingTables: [],
             absentOptionalTables: ["ZWAMESSAGEDATAITEM"], chatCount: 4, messageCount: 3)
         let (text, isError) = await call(ToolCatalog.statusName, store: store)
         #expect(!isError)
@@ -502,21 +502,14 @@ struct WhatsAppToolsTests {
         #expect(isError)
     }
 
-    /// The only tools allowed to say they are not read-only, and only because they keep a
-    /// result in `~/Library/Caches/whatsapp-mcp`. Naming them here means a tool that starts
-    /// writing something else has to be added to this list on purpose.
-    private static let cacheWriters: Set<String> = [ToolCatalog.audioTranscribeName]
-
     /// The whole catalogue, not a hard-coded list: a tool added later that could send,
     /// edit or delete would have to declare itself here, and this fails when it does.
     /// This server reads WhatsApp and never changes it, and that is the property worth
-    /// pinning; the one tool that writes its own cache is named above.
-    @Test("Every tool in the catalogue is read-only, except those that only keep a cache")
+    /// pinning, and since nothing is kept any more there is no exception to it.
+    @Test("Every tool in the catalogue is read-only")
     func everyToolIsReadOnly() {
         for tool in ToolCatalog.all() {
-            if !Self.cacheWriters.contains(tool.name) {
-                #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
-            }
+            #expect(tool.annotations.readOnlyHint == true, "\(tool.name) is not read-only")
             #expect(tool.annotations.destructiveHint != true, "\(tool.name) claims to destroy")
             #expect(tool.annotations.openWorldHint != true, "\(tool.name) claims to leave this Mac")
         }

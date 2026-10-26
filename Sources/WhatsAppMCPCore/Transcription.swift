@@ -14,17 +14,10 @@ public struct TranscriptSegment: Sendable, Equatable, Codable {
     }
 }
 
-public struct Transcription: Sendable, Equatable, Codable {
+public struct Transcription: Sendable, Equatable {
     public var localeIdentifier: String
     public var durationSeconds: Double
     public var segments: [TranscriptSegment]
-    public var sha256: String
-    /// Not stored: set when a result was read back instead of computed.
-    public var fromCache = false
-
-    enum CodingKeys: String, CodingKey {
-        case localeIdentifier, durationSeconds, segments, sha256
-    }
 }
 
 public enum TranscriptionError: Error, Equatable {
@@ -229,27 +222,26 @@ private final class RunningProcess: @unchecked Sendable {
     }
 }
 
-/// Transcribes one file: convert if macOS cannot open it, recognise on this Mac, remember.
+/// Transcribes one file: convert if macOS cannot open it, recognise on this Mac, return.
 ///
-/// Everything it writes is under `cacheDirectory`: a scratch directory for the converted
-/// WAV, deleted when the call ends, and `transcripts/`, which keeps each result keyed by the
-/// file's SHA-256 and the language so the same audio is never recognised twice. A cached
-/// transcript is the content of someone's message in plaintext, so the directories are
-/// `0700` and the files `0600`.
+/// Nothing is kept. The one thing it writes is a scratch directory under `scratchDirectory`
+/// for the converted WAV, `0700`, deleted when the call ends. A transcript is the content of
+/// someone's message, so it exists only in the answer: asking again recognises the audio
+/// again.
 public struct TranscriptionService: Sendable {
     public let mediaFiles: MediaFiles
-    public let cacheDirectory: URL
+    public let scratchDirectory: URL
     public let converter: FFmpegConverter?
     public let engine: any SpeechTranscribing
 
     public static let maximumFileBytes: Int64 = 200 * 1024 * 1024
 
     public init(
-        mediaFiles: MediaFiles, cacheDirectory: URL, converter: FFmpegConverter?,
+        mediaFiles: MediaFiles, scratchDirectory: URL, converter: FFmpegConverter?,
         engine: any SpeechTranscribing
     ) {
         self.mediaFiles = mediaFiles
-        self.cacheDirectory = cacheDirectory
+        self.scratchDirectory = scratchDirectory
         self.converter = converter
         self.engine = engine
     }
@@ -261,16 +253,11 @@ public struct TranscriptionService: Sendable {
 
         let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines)
         let locale = try await engine.resolveLocale(trimmed?.isEmpty == true ? nil : trimmed)
-        let facts = try MediaFiles.facts(of: url)
-        let cached = cacheURL(sha256: facts.sha256, locale: locale)
-        if let data = try? Data(contentsOf: cached),
-            var stored = try? JSONDecoder().decode(Transcription.self, from: data)
-        {
-            stored.fromCache = true
-            return stored
-        }
+        try MediaFiles.requireRegularFile(url)
 
-        let scratch = cacheDirectory.appendingPathComponent("tmp/\(UUID().uuidString)")
+        // Anything a killed earlier process left here is swept first: SIGKILL runs no cleanup.
+        ScratchSweep.sweepStaleDirectories(in: scratchDirectory)
+        let scratch = scratchDirectory.appendingPathComponent("tmp/\(UUID().uuidString)")
         try makePrivateDirectory(scratch)
         ProcessCleanup.shared.register(path: scratch.path)
         defer {
@@ -280,11 +267,8 @@ public struct TranscriptionService: Sendable {
 
         let (audio, duration) = try await readableAudio(from: url, scratch: scratch)
         let segments = try await engine.transcribe(audio: audio, locale: locale)
-        let result = Transcription(
-            localeIdentifier: locale, durationSeconds: duration, segments: segments,
-            sha256: facts.sha256)
-        try store(result, at: cached)
-        return result
+        return Transcription(
+            localeIdentifier: locale, durationSeconds: duration, segments: segments)
     }
 
     /// A file AVFoundation can read: the original if it already is one, otherwise ffmpeg's
@@ -301,18 +285,6 @@ public struct TranscriptionService: Sendable {
             throw TranscriptionError.conversionFailed("the converted file is empty or unreadable")
         }
         return (wav, Double(file.length) / file.processingFormat.sampleRate)
-    }
-
-    private var transcriptsDirectory: URL { cacheDirectory.appendingPathComponent("transcripts") }
-
-    func cacheURL(sha256: String, locale: String) -> URL {
-        let safeLocale = locale.map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
-        return transcriptsDirectory.appendingPathComponent("\(sha256)-\(safeLocale).json")
-    }
-
-    private func store(_ transcription: Transcription, at url: URL) throws {
-        try makePrivateDirectory(transcriptsDirectory)
-        try PrivateFile.write(try JSONEncoder().encode(transcription), to: url)
     }
 
     private func makePrivateDirectory(_ url: URL) throws {

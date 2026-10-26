@@ -1,7 +1,7 @@
 import Foundation
 
-/// The only type that reads the chat store directly. `SnapshotCache` also opens WhatsApp's
-/// other databases, once each per change, to copy them.
+/// The only type that reads the chat store through `--database`. `ContainerDatabases` opens
+/// WhatsApp's other databases the same way, live and read-only.
 ///
 /// Everything above the `WhatsAppStore` protocol is driven by a fake in the tests; this
 /// file is driven by a fixture database the suite builds in a temporary directory, with
@@ -57,10 +57,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         let attributes = try? FileManager.default.attributesOfItem(atPath: path)
         let exists = attributes != nil
 
-        // A `-wal` with bytes in it means WhatsApp has written messages the main file
-        // does not carry yet. `immutable=1` never reads it, so those messages are simply
-        // not visible until WhatsApp checkpoints. Reported, never worked around: reading
-        // the WAL means taking locks on a database another app is actively using.
+        // A `-wal` with bytes in it means WhatsApp has written messages the main file does
+        // not carry yet. They are read through the log, so this is reported only so the
+        // size of the part of the history that has not been checkpointed is visible.
         let walSize =
             (try? FileManager.default.attributesOfItem(atPath: path + "-wal"))?[.size] as? Int64
         var missing: [String] = []
@@ -83,7 +82,7 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             exists: exists,
             size: attributes?[.size] as? Int64,
             modified: attributes?[.modificationDate] as? Date,
-            hasPendingWAL: (walSize ?? 0) > 0,
+            walBytes: walSize,
             missingTables: missing,
             absentOptionalTables: absentOptional,
             chatCount: chatCount,
@@ -767,9 +766,11 @@ public struct SystemWhatsAppStore: WhatsAppStore {
 
     // MARK: Plumbing
 
+    /// One read transaction for the life of the connection, so a page and the count that
+    /// describes it come from the same snapshot while WhatsApp keeps writing.
     private func open() throws -> ReadOnlyDatabase {
         do {
-            return try ReadOnlyDatabase(path: path)
+            return try ReadOnlyDatabase(path: path, readTransaction: true)
         } catch {
             if let failure = error as? ReadOnlyDatabase.OpenFailure, failure.isPermissionDenied {
                 throw ToolError.storeUnavailable(.accessDenied(path: path))

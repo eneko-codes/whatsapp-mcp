@@ -143,18 +143,17 @@ struct AccessDeniedTests {
         #expect(status.contains("permission: macOS allowed this server to read it"))
     }
 
-    @Test("A database the cache cannot read from the container is a refusal, not 'missing'")
-    func snapshotDenial() async throws {
+    @Test("A database the container refuses to open is a refusal, not 'missing'")
+    func sourceDenial() async throws {
         let directory = try temporary()
         defer { try? FileManager.default.removeItem(at: directory) }
         let container = directory.appendingPathComponent("container")
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
         _ = try deniedFile(in: container, named: "ContactsV2.sqlite")
-        let cache = SnapshotCache(
-            containerDirectory: container, cacheDirectory: directory.appendingPathComponent("cache"))
+        let databases = ContainerDatabases(containerDirectory: container)
         let tools = WhatsAppTools(
-            store: FakeWhatsAppStore(), explorer: SnapshotDatabaseExplorer(cache: cache),
-            reader: SnapshotDomainReader(cache: cache), calendar: Fixtures.calendar)
+            store: FakeWhatsAppStore(), explorer: LiveDatabaseExplorer(databases: databases),
+            reader: LiveDomainReader(databases: databases), calendar: Fixtures.calendar)
 
         for (tool, arguments) in [
             (ToolCatalog.dbTablesName, ["db": Value.string("ContactsV2")]),
@@ -192,7 +191,7 @@ struct AccessDeniedTests {
         let tools = WhatsAppTools(
             store: store, mediaFiles: MediaFiles(root: root),
             transcription: TranscriptionService(
-                mediaFiles: MediaFiles(root: root), cacheDirectory: directory.appendingPathComponent("cache"),
+                mediaFiles: MediaFiles(root: root), scratchDirectory: directory.appendingPathComponent("cache"),
                 converter: nil, engine: UnusedEngine()),
             calendar: Fixtures.calendar)
 

@@ -619,10 +619,10 @@ public struct DatabaseInfo: Sendable, Equatable {
     /// Bytes, or nil when the file is not there.
     public let size: Int64?
     public let modified: Date?
-    /// True when a `-wal` sidecar sits next to the database with bytes in it. The store
-    /// is opened `immutable=1`, which means the WAL is never read, so anything WhatsApp
-    /// has not yet checkpointed is invisible here. Worth reporting rather than hiding.
-    public let hasPendingWAL: Bool
+    /// Size of the `-wal` sidecar, or nil when there is none. The store is read through
+    /// it, so these are messages WhatsApp has written that the main file does not carry
+    /// yet and that are still visible here.
+    public let walBytes: Int64?
     /// Tables the queries need that the file does not have. Empty is the healthy case.
     public let missingTables: [String]
     /// Tables this server reads when they are there and does without when they are not —
@@ -633,7 +633,7 @@ public struct DatabaseInfo: Sendable, Equatable {
     public let messageCount: Int?
 
     public init(
-        path: String, exists: Bool, size: Int64?, modified: Date?, hasPendingWAL: Bool,
+        path: String, exists: Bool, size: Int64?, modified: Date?, walBytes: Int64? = nil,
         missingTables: [String], absentOptionalTables: [String] = [], chatCount: Int?,
         messageCount: Int?
     ) {
@@ -641,7 +641,7 @@ public struct DatabaseInfo: Sendable, Equatable {
         self.exists = exists
         self.size = size
         self.modified = modified
-        self.hasPendingWAL = hasPendingWAL
+        self.walBytes = walBytes
         self.missingTables = missingTables
         self.absentOptionalTables = absentOptionalTables
         self.chatCount = chatCount

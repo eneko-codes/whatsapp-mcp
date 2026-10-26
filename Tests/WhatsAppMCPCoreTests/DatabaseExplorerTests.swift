@@ -56,16 +56,15 @@ struct FakeContainer {
         }
     }
 
-    func explorer() -> SnapshotDatabaseExplorer {
-        SnapshotDatabaseExplorer(
-            cache: SnapshotCache(containerDirectory: container, cacheDirectory: cache))
+    func explorer() -> LiveDatabaseExplorer {
+        LiveDatabaseExplorer(databases: ContainerDatabases(containerDirectory: container))
     }
 
     func tools() -> WhatsAppTools {
-        let cache = SnapshotCache(containerDirectory: container, cacheDirectory: cache)
+        let databases = ContainerDatabases(containerDirectory: container)
         return WhatsAppTools(
-            store: FakeWhatsAppStore(), explorer: SnapshotDatabaseExplorer(cache: cache),
-            reader: SnapshotDomainReader(cache: cache), calendar: Fixtures.calendar)
+            store: FakeWhatsAppStore(), explorer: LiveDatabaseExplorer(databases: databases),
+            reader: LiveDomainReader(databases: databases), calendar: Fixtures.calendar)
     }
 
     /// Builds a database from invented DDL and rows, shaped like WhatsApp's own.
@@ -134,7 +133,7 @@ struct AllowedDatabaseTests {
         }
     }
 
-    @Test("db_* refuses every one of them and copies nothing")
+    @Test("db_* refuses every one of them and reads nothing")
     func toolsRefuseForbiddenNames() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
@@ -156,11 +155,11 @@ struct AllowedDatabaseTests {
     }
 }
 
-@Suite("Snapshot cache")
-struct SnapshotCacheTests {
+@Suite("Live databases")
+struct ContainerDatabasesTests {
 
-    @Test("A copy is made in the cache directory and nothing changes in the container")
-    func copyLeavesContainerUntouched() async throws {
+    @Test("Reading leaves the container untouched and copies nothing")
+    func readLeavesContainerUntouched() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.chatStorage)
@@ -171,284 +170,63 @@ struct SnapshotCacheTests {
             fake.tools(), ToolCatalog.dbTablesName, ["db": .string("ExtChatDB")])
         #expect(!isError)
         #expect(text.contains("ZINVENTED"))
+        #expect(text.contains("ExtChatDB · read live"))
 
+        // A source in rollback-journal mode has no log and no index to update, so nothing at
+        // all changes. And there is no copy anywhere: no database content is kept.
         #expect(fake.containerState() == before, "the container was modified by a read")
-        let copy = fake.cache.appendingPathComponent("ExtChatDB.sqlite")
-        #expect(FileManager.default.fileExists(atPath: copy.path))
-
-        // Copies hold real message data in plaintext: owner-only.
-        let fileMode = try FileManager.default.attributesOfItem(atPath: copy.path)[
-            .posixPermissions] as? Int
-        let directoryMode = try FileManager.default.attributesOfItem(atPath: fake.cache.path)[
-            .posixPermissions] as? Int
-        #expect(fileMode == 0o600)
-        #expect(directoryMode == 0o700)
-        let stamp = fake.cache.appendingPathComponent("ExtChatDB.stamp.json")
-        #expect(try FileManager.default.attributesOfItem(atPath: stamp.path)[.posixPermissions] as? Int == 0o600)
-        // Only this database was copied, not its neighbours.
-        #expect(!FileManager.default.fileExists(
-            atPath: fake.cache.appendingPathComponent("ChatStorage.sqlite").path))
+        #expect(!FileManager.default.fileExists(atPath: fake.cache.path))
     }
 
-    @Test("A copy holds none of the key material db_query refuses to return, not even as bytes")
-    func copiesAreScrubbed() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        let marker = "KEYMARK-0123456789-ABCDEF"
-        try fake.build(
-            .extendedChat,
-            [
-                "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key_id TEXT, key BLOB)",
-                "INSERT INTO feature_key_store VALUES (1, 'id', CAST('\(marker)' AS BLOB))",
-                "CREATE TABLE extended_media_item (row_id INTEGER PRIMARY KEY, media_key BLOB, url TEXT)",
-                "INSERT INTO extended_media_item VALUES (1, CAST('\(marker)' AS BLOB), 'kept')",
-                "CREATE TABLE channel_metadata (channel_metadata_id INTEGER PRIMARY KEY, channel_name TEXT)",
-                "INSERT INTO channel_metadata VALUES (1, 'kept too')",
-            ])
-        try fake.build(
-            .chatStorage,
-            [
-                "CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIAKEY BLOB, ZTITLE TEXT)",
-                "INSERT INTO ZWAMEDIAITEM VALUES (1, CAST('\(marker)' AS BLOB), 'kept')",
-            ])
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        for database in [AllowedDatabase.extendedChat, .chatStorage] {
-            let (url, _) = try cache.snapshot(of: database)
-            let bytes = try Data(contentsOf: url)
-            #expect(bytes.range(of: Data(marker.utf8)) == nil, "\(database) copy still holds the key bytes")
-        }
-        // Everything around the removed columns survives.
-        let rows = try fake.explorer().select(
-            "SELECT url FROM extended_media_item UNION ALL SELECT channel_name FROM channel_metadata",
-            in: .extendedChat, limit: 10)
-        #expect(rows.rows.map { $0[0] } == ["kept", "kept too"])
-        let titles = try fake.explorer().select("SELECT ZTITLE FROM ZWAMEDIAITEM", in: .chatStorage, limit: 10)
-        #expect(titles.rows == [["kept"]])
-        // The source was not touched.
-        let source = try Data(contentsOf: fake.sourceURL(.chatStorage))
-        #expect(source.range(of: Data(marker.utf8)) != nil, "the scrub reached the source")
-    }
-
-    @Test("Rows WhatsApp deleted long ago do not survive in the copy's free pages")
-    func deletedBytesDoNotSurvive() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        let marker = "STALEKEY-9876543210-ZYXWVU"
-        // Larger than a page, so it spills to overflow pages that go to the freelist.
-        let blob = String(repeating: "x", count: 6000) + marker + String(repeating: "y", count: 6000)
-        try fake.build(
-            .extendedChat,
-            [
-                "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key BLOB)",
-                "INSERT INTO feature_key_store VALUES (1, CAST('\(blob)' AS BLOB))",
-                "DELETE FROM feature_key_store",
-            ])
-        let source = try Data(contentsOf: fake.sourceURL(.extendedChat))
-        try #require(
-            source.range(of: Data(marker.utf8)) != nil,
-            "precondition: the deleted bytes must still be in the source for this test to mean anything")
-
-        let (url, _) = try SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-            .snapshot(of: .extendedChat)
-        #expect(try Data(contentsOf: url).range(of: Data(marker.utf8)) == nil)
-        let leftovers = try FileManager.default.contentsOfDirectory(atPath: fake.cache.path).sorted()
-        #expect(leftovers == ["ExtChatDB.sqlite", "ExtChatDB.stamp.json"], "\(leftovers)")
-    }
-
-    @Test("A full-text table with a tokenizer this process lacks does not stop the copy")
-    func virtualTablesAreSkipped() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.build(
-            .chatSearch,
-            [
-                "CREATE VIRTUAL TABLE docs USING fts4(content, tokenize=simple)",
-                "INSERT INTO docs (content) VALUES ('invented words')",
-            ])
-        // WhatsApp's own tokenizers are not registered in this process. Rewriting the schema
-        // needs `writable_schema`, which the library refuses to honour in-process (its
-        // defensive mode cannot be switched off from Swift), so the system's sqlite3 does it.
-        let editor = Process()
-        editor.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        editor.arguments = [
-            fake.sourceURL(.chatSearch).path,
-            "PRAGMA writable_schema = ON; UPDATE sqlite_master SET sql = replace(sql, 'tokenize=simple', 'tokenize=wa_missing') WHERE name = 'docs'; PRAGMA writable_schema = OFF;",
-        ]
-        try editor.run()
-        editor.waitUntilExit()
-        #expect(editor.terminationStatus == 0)
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        let (url, _) = try cache.snapshot(of: .chatSearch)
-        #expect(FileManager.default.fileExists(atPath: url.path))
-        // Structure stays readable even though the table itself cannot be opened here.
-        let (text, isError) = try {
-            let schema = try fake.explorer().schema(of: .chatSearch, table: "docs")
-            return (schema.statements.joined(), false)
-        }()
-        #expect(!isError)
-        #expect(text.contains("wa_missing"))
-    }
-
-    @Test("A copy made before the current scrubbing rules is made again, source unchanged")
-    func olderScrubVersionIsStale() throws {
+    @Test("A row that exists only in the write-ahead log is read, and so is the next one")
+    func readsThroughTheWAL() throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.contacts)
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        let first = try cache.snapshot(of: .contacts)
 
-        // Edit the text of the record, not a re-serialised object: a JSON round trip rewrites
-        // the stored doubles, which would make the stamp differ for a reason that has nothing
-        // to do with the scrub version and let this test pass without the mechanism.
-        let record = fake.cache.appendingPathComponent("ContactsV2.stamp.json")
-        var text = try String(contentsOf: record, encoding: .utf8)
-        let versionField = try #require(text.range(of: #""scrubVersion":\d+"#, options: .regularExpression))
-        text.replaceSubrange(versionField, with: "\"scrubVersion\":0")
-        try Data(text.utf8).write(to: record)
+        // A live writer, the way WhatsApp holds its databases: WAL mode, automatic
+        // checkpoints off, so what it writes after this point lives only in the `-wal`.
+        var writer: OpaquePointer?
+        #expect(sqlite3_open(fake.sourceURL(.contacts).path, &writer) == SQLITE_OK)
+        defer { sqlite3_close(writer) }
+        sqlite3_exec(writer, "PRAGMA journal_mode=WAL", nil, nil, nil)
+        sqlite3_exec(writer, "PRAGMA wal_autocheckpoint=0", nil, nil, nil)
+        sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('gamma')", nil, nil, nil)
 
-        // Prove the only difference is the version: the stamp still matches the untouched source.
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        let stored = try decoder.decode(SnapshotCache.Record.self, from: Data(contentsOf: record))
-        #expect(stored.stamp == SnapshotCache.stamp(of: fake.sourceURL(.contacts)))
-        #expect(stored.scrubVersion == 0)
-
-        #expect(cache.existingSnapshots().first?.stale == true)
-        let second = try cache.snapshot(of: .contacts)
-        #expect(second.info.copiedAt > first.info.copiedAt)
-
-        // A record from before there was a version at all is treated the same way.
-        var legacy = try String(contentsOf: record, encoding: .utf8)
-        let field = try #require(legacy.range(of: #","scrubVersion":\d+|"scrubVersion":\d+,"#, options: .regularExpression))
-        legacy.removeSubrange(field)
-        try Data(legacy.utf8).write(to: record)
-        let third = try cache.snapshot(of: .contacts)
-        #expect(third.info.copiedAt > second.info.copiedAt)
-    }
-
-    @Test("A temporary left by a dead process is swept when the next copy is made")
-    func copySweepsStaleTemporaries() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.labels)
-        try FileManager.default.createDirectory(at: fake.cache, withIntermediateDirectories: true)
-        let stale = fake.cache.appendingPathComponent("ChatStorage.sqlite.tmp-DEAD")
-        let fresh = fake.cache.appendingPathComponent("ChatStorage.sqlite.tmp-ALIVE")
-        try Data("raw backup with keys".utf8).write(to: stale)
-        try Data("another instance's".utf8).write(to: fresh)
-        try FileManager.default.setAttributes(
-            [.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: stale.path)
-
-        _ = try SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-            .snapshot(of: .labels)
-
-        #expect(!FileManager.default.fileExists(atPath: stale.path))
-        #expect(FileManager.default.fileExists(atPath: fresh.path))
-    }
-
-    @Test("A cache file written for the record or a transcript is owner-only, and replaced whole")
-    func privateFilesAreOwnerOnly() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try FileManager.default.createDirectory(at: fake.cache, withIntermediateDirectories: true)
-        let file = fake.cache.appendingPathComponent("record.json")
-        func mode() -> Int? {
-            (try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions] as? Int
-        }
-        try PrivateFile.write(Data("one".utf8), to: file)
-        #expect(mode() == 0o600)
-        try PrivateFile.write(Data("two".utf8), to: file)
-        #expect(mode() == 0o600)
-        #expect(try String(contentsOf: file, encoding: .utf8) == "two")
-        let leftovers = try FileManager.default.contentsOfDirectory(atPath: fake.cache.path)
-        #expect(leftovers == ["record.json"], "\(leftovers)")
-    }
-
-    @Test("A cache directory that already exists keeps its mode; one the server makes is private")
-    func existingCacheDirectoryIsNotChmodded() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.contacts)
-        try FileManager.default.createDirectory(
-            at: fake.cache, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o755])
-        _ = try SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-            .snapshot(of: .contacts)
-        let mode = try FileManager.default.attributesOfItem(atPath: fake.cache.path)[
-            .posixPermissions] as? Int
-        #expect(mode == 0o755)
-        let copyMode = try FileManager.default.attributesOfItem(
-            atPath: fake.cache.appendingPathComponent("ContactsV2.sqlite").path)[.posixPermissions] as? Int
-        #expect(copyMode == 0o600, "the copy itself must stay owner-only")
-    }
-
-    @Test("The copy is reused until the source's modification time changes")
-    func refreshFollowsModificationTime() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.contacts)
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-
-        let first = try cache.snapshot(of: .contacts)
-        let second = try cache.snapshot(of: .contacts)
-        #expect(
-            abs(first.info.copiedAt.timeIntervalSince(second.info.copiedAt)) < 0.001,
-            "an unchanged source was recopied")
-
-        try fake.add(.contacts, row: "gamma")
-        try FileManager.default.setAttributes(
-            [.modificationDate: Date().addingTimeInterval(60)],
-            ofItemAtPath: fake.sourceURL(.contacts).path)
-
-        #expect(cache.existingSnapshots().first?.stale == true)
-        let third = try cache.snapshot(of: .contacts)
-        #expect(third.info.copiedAt > first.info.copiedAt)
-        #expect(cache.existingSnapshots().first?.stale == false)
-
-        let rows = try fake.explorer().select(
+        let mainFile = try Data(contentsOf: fake.sourceURL(.contacts))
+        var rows = try fake.explorer().select(
             "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10)
         #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma"])
+
+        sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('delta')", nil, nil, nil)
+        // Only the log changed: the main file is byte for byte what it was.
+        #expect(try Data(contentsOf: fake.sourceURL(.contacts)) == mainFile)
+        rows = try fake.explorer().select(
+            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10)
+        #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma", "delta"])
+        #expect((rows.source.walBytes ?? 0) > 0)
     }
 
-    @Test("A change confined to the write-ahead log does not trigger a recopy")
-    func walOnlyChangeDoesNotRecopy() throws {
+    @Test("A database nobody has open is read, and nothing is created beside it")
+    func readsAfterTheWriterQuits() throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.contacts)
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        let first = try cache.snapshot(of: .contacts)
+        var writer: OpaquePointer?
+        sqlite3_open(fake.sourceURL(.contacts).path, &writer)
+        sqlite3_exec(writer, "PRAGMA journal_mode=WAL", nil, nil, nil)
+        sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('gamma')", nil, nil, nil)
+        // WhatsApp quits: the last connection checkpoints, and the sidecars go.
+        sqlite3_close(writer)
+        let path = fake.sourceURL(.contacts).path
+        try? FileManager.default.removeItem(atPath: path + "-wal")
+        try? FileManager.default.removeItem(atPath: path + "-shm")
 
-        // The source is read immutable, so a WAL can never reach a copy.
-        try Data(repeating: 1, count: 4096).write(
-            to: URL(fileURLWithPath: fake.sourceURL(.contacts).path + "-wal"))
-        #expect(cache.existingSnapshots().first?.stale == false)
-        let second = try cache.snapshot(of: .contacts)
-        // JSON round-trips a Date to within a microsecond, so compare with a tolerance.
-        #expect(abs(second.info.copiedAt.timeIntervalSince(first.info.copiedAt)) < 0.001)
-        #expect(second.info.walPending == false, "the copy was taken before the WAL existed")
-    }
-
-    @Test("Refreshing a WAL-mode source leaves no stray sidecar files in the cache")
-    func refreshLeavesNoSidecars() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.contacts)
-        // Put the invented source in WAL mode, as WhatsApp's are, then checkpoint it away.
-        var handle: OpaquePointer?
-        sqlite3_open(fake.sourceURL(.contacts).path, &handle)
-        sqlite3_exec(handle, "PRAGMA journal_mode=WAL", nil, nil, nil)
-        sqlite3_close(handle)
-
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        for round in 1...3 {
-            try fake.add(.contacts, row: "row\(round)")
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date().addingTimeInterval(Double(round) * 60)],
-                ofItemAtPath: fake.sourceURL(.contacts).path)
-            _ = try cache.snapshot(of: .contacts)
-        }
-        let names = try FileManager.default.contentsOfDirectory(atPath: fake.cache.path).sorted()
-        #expect(names == ["ContactsV2.sqlite", "ContactsV2.stamp.json"], "\(names)")
+        let rows = try fake.explorer().select(
+            "SELECT count(*) FROM ZINVENTED", in: .contacts, limit: 10)
+        #expect(rows.rows == [["3"]])
+        #expect(!FileManager.default.fileExists(atPath: path + "-wal"))
+        #expect(!FileManager.default.fileExists(atPath: path + "-shm"))
     }
 
     @Test("A database the container does not have is reported, not invented")
@@ -461,19 +239,31 @@ struct SnapshotCacheTests {
         #expect(text.contains("not in WhatsApp's container"))
     }
 
-    @Test("whatsapp_status reports the age of a copy and does not take one")
-    func statusReportsCopiesWithoutCopying() async throws {
+    @Test("whatsapp_status says nothing is copied, and opens no other database")
+    func statusOpensNothing() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.labels)
+        let before = fake.containerState()
 
-        let (before, _) = await call(fake.tools(), ToolCatalog.statusName, [:])
-        #expect(before.contains("none yet"))
+        let (text, isError) = await call(fake.tools(), ToolCatalog.statusName, [:])
+        #expect(!isError)
+        #expect(text.contains("nothing is copied or kept"))
+        #expect(!text.contains("COPIES"))
+        #expect(fake.containerState() == before)
         #expect(!FileManager.default.fileExists(atPath: fake.cache.path))
+    }
 
-        _ = try fake.explorer().tables(in: .labels)
-        let (after, _) = await call(fake.tools(), ToolCatalog.statusName, [:])
-        #expect(after.contains("Labels: copied"))
+    @Test("When the source itself is garbage the failure is reported")
+    func damagedSourceIsReported() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        try FileManager.default.createDirectory(
+            at: fake.sourceURL(.location).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(repeating: 0x42, count: 8192).write(to: fake.sourceURL(.location))
+        let (text, isError) = await call(fake.tools(), ToolCatalog.dbTablesName, ["db": .string("Location")])
+        #expect(isError)
+        #expect(text.contains("Location"))
     }
 }
 
@@ -600,10 +390,7 @@ struct DatabaseQueryTests {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.callHistory)
-        let (url, _) = try SnapshotCache(
-            containerDirectory: fake.container, cacheDirectory: fake.cache
-        ).snapshot(of: .callHistory)
-        let database = try ReadOnlyDatabase(path: url.path)
+        let database = try ReadOnlyDatabase(path: fake.sourceURL(.callHistory).path)
 
         #expect(throws: ReadOnlyDatabase.SelectRefusal.timedOut) {
             _ = try database.selectRows(
@@ -618,10 +405,7 @@ struct DatabaseQueryTests {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.callHistory)
-        let (url, _) = try SnapshotCache(
-            containerDirectory: fake.container, cacheDirectory: fake.cache
-        ).snapshot(of: .callHistory)
-        let database = try ReadOnlyDatabase(path: url.path)
+        let database = try ReadOnlyDatabase(path: fake.sourceURL(.callHistory).path)
         #expect(throws: (any Error).self) {
             try database.query("DELETE FROM ZINVENTED") { _ in }
         }
@@ -642,93 +426,5 @@ struct DatabaseQueryTests {
             ["db": .string("CallHistory"), "table": .string("x' OR '1'='1")])
         #expect(!isError)
         #expect(injected.contains("No such table"))
-    }
-}
-
-@Suite("Cached copies heal themselves")
-struct SelfHealingCopyTests {
-
-    @Test("A copy overwritten with garbage under a valid stamp is made again, not reported")
-    func corruptCopyIsRemade() async throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.contacts)
-        let tools = fake.tools()
-
-        let (first, firstError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("ContactsV2")])
-        #expect(!firstError, Comment(rawValue: first))
-
-        // Another instance, a crash or a full disk leaves this behind; the stamp still matches.
-        let copy = fake.cache.appendingPathComponent("ContactsV2.sqlite")
-        try Data(repeating: 0x42, count: 8192).write(to: copy)
-
-        let (healed, healedError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("ContactsV2")])
-        #expect(!healedError, Comment(rawValue: healed))
-        #expect(healed.contains("ZINVENTED"))
-        // And the rebuilt copy really is a database again.
-        let rows = try fake.explorer().select("SELECT count(*) FROM ZINVENTED", in: .contacts, limit: 1)
-        #expect(rows.rows == [["2"]])
-    }
-
-    @Test("A truncated copy and a missing file under a valid stamp heal the same way")
-    func truncatedAndMissingCopiesAreRemade() async throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.labels)
-        let tools = fake.tools()
-        _ = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
-        let copy = fake.cache.appendingPathComponent("Labels.sqlite")
-
-        try Data().write(to: copy)  // truncated to nothing
-        let (truncated, truncatedError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
-        #expect(!truncatedError, Comment(rawValue: truncated))
-
-        try FileManager.default.removeItem(at: copy)
-        let (missing, missingError) = await call(tools, ToolCatalog.dbTablesName, ["db": .string("Labels")])
-        #expect(!missingError, Comment(rawValue: missing))
-    }
-
-    @Test("The domain readers heal a damaged copy as well, not only db_tables")
-    func domainReadersHeal() async throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.build(
-            .contacts,
-            [
-                "CREATE TABLE ZWAADDRESSBOOKCONTACT (Z_PK INTEGER PRIMARY KEY, ZFULLNAME VARCHAR, ZGIVENNAME VARCHAR, ZLASTNAME VARCHAR, ZBUSINESSNAME VARCHAR, ZPHONENUMBER VARCHAR, ZLID VARCHAR, ZWHATSAPPID VARCHAR, ZUSERNAME VARCHAR, ZABOUTTEXT VARCHAR, ZLASTUPDATED TIMESTAMP)",
-                "INSERT INTO ZWAADDRESSBOOKCONTACT (Z_PK, ZFULLNAME) VALUES (1, 'Invented Person')",
-            ])
-        let tools = fake.tools()
-        let (first, firstError) = await call(tools, ToolCatalog.addressBookName, [:])
-        #expect(!firstError, Comment(rawValue: first))
-        try Data(repeating: 0x42, count: 8192).write(to: fake.cache.appendingPathComponent("ContactsV2.sqlite"))
-        let (healed, healedError) = await call(tools, ToolCatalog.addressBookName, [:])
-        #expect(!healedError, Comment(rawValue: healed))
-        #expect(healed.contains("Invented Person"))
-    }
-
-    @Test("A healthy copy is not made again just because it was read")
-    func healthyCopyIsReused() throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try fake.make(.sticker)
-        let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
-        let first = try cache.openReadable(.sticker).info
-        let second = try cache.openReadable(.sticker).info
-        #expect(abs(first.copiedAt.timeIntervalSince(second.copiedAt)) < 0.001)
-    }
-
-    @Test("When the source itself is garbage the failure is reported, with what was tried")
-    func damagedSourceIsReported() async throws {
-        let fake = try FakeContainer()
-        defer { fake.remove() }
-        try FileManager.default.createDirectory(
-            at: fake.sourceURL(.location).deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(repeating: 0x42, count: 8192).write(to: fake.sourceURL(.location))
-        let (text, isError) = await call(fake.tools(), ToolCatalog.dbTablesName, ["db": .string("Location")])
-        #expect(isError)
-        #expect(text.contains("Location"))
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: fake.cache.path)) ?? []
-        #expect(!leftovers.contains { $0.contains(".tmp-") }, "\(leftovers)")
     }
 }

@@ -115,33 +115,33 @@ public struct Channel: Sendable, Equatable {
 
 /// One seam for everything outside the chat store.
 public protocol DomainReader: Sendable {
-    func calls(matching query: CallQuery) throws -> (calls: [CallEvent], snapshot: SnapshotInfo)
-    func locationSharing(limit: Int) throws -> (sharing: LocationSharing, snapshot: SnapshotInfo)
-    func labels() throws -> (labels: [Label], snapshot: SnapshotInfo)
+    func calls(matching query: CallQuery) throws -> (calls: [CallEvent], source: SourceInfo)
+    func locationSharing(limit: Int) throws -> (sharing: LocationSharing, source: SourceInfo)
+    func labels() throws -> (labels: [Label], source: SourceInfo)
     func labeledEntities(labelID: Int64, limit: Int) throws
-        -> (label: Label?, entities: [LabeledEntity], snapshot: SnapshotInfo)
+        -> (label: Label?, entities: [LabeledEntity], source: SourceInfo)
     func addressBook(matching query: AddressBookQuery) throws
-        -> (entries: [AddressBookEntry], snapshot: SnapshotInfo)
+        -> (entries: [AddressBookEntry], source: SourceInfo)
     func lidLookup(_ value: String) throws
-        -> (matches: [LIDMatch], snapshots: [SnapshotInfo], notes: [String])
-    func channels(name: String?, limit: Int) throws -> (channels: [Channel], snapshot: SnapshotInfo)
+        -> (matches: [LIDMatch], sources: [SourceInfo], notes: [String])
+    func channels(name: String?, limit: Int) throws -> (channels: [Channel], source: SourceInfo)
 }
 
-// MARK: - Implementation over the cached copies
+// MARK: - Implementation over the live databases
 
-public struct SnapshotDomainReader: DomainReader {
-    private let cache: SnapshotCache
+public struct LiveDomainReader: DomainReader {
+    private let databases: ContainerDatabases
 
-    public init(cache: SnapshotCache) {
-        self.cache = cache
+    public init(databases: ContainerDatabases) {
+        self.databases = databases
     }
 
-    /// Opens the copy of one database and checks that the tables and columns this reader
+    /// Opens one database live and checks that the tables and columns this reader
     /// uses are there, naming whatever is not.
     private func open(_ database: AllowedDatabase, requires needs: [String: [String]]) throws
-        -> (ReadOnlyDatabase, SnapshotInfo)
+        -> (ReadOnlyDatabase, SourceInfo)
     {
-        let (connection, info) = try cache.openReadable(database)
+        let (connection, info) = try databases.open(database)
         var missing: [String] = []
         for (table, columns) in needs.sorted(by: { $0.key < $1.key }) {
             let present = try connection.columnNames(of: table)
@@ -162,7 +162,7 @@ public struct SnapshotDomainReader: DomainReader {
 
     // MARK: Calls
 
-    public func calls(matching query: CallQuery) throws -> (calls: [CallEvent], snapshot: SnapshotInfo) {
+    public func calls(matching query: CallQuery) throws -> (calls: [CallEvent], source: SourceInfo) {
         let (database, info) = try open(
             .callHistory,
             requires: [
@@ -225,7 +225,7 @@ public struct SnapshotDomainReader: DomainReader {
 
     // MARK: Live location
 
-    public func locationSharing(limit: Int) throws -> (sharing: LocationSharing, snapshot: SnapshotInfo) {
+    public func locationSharing(limit: Int) throws -> (sharing: LocationSharing, source: SourceInfo) {
         let (database, info) = try open(
             .location,
             requires: [
@@ -270,7 +270,7 @@ public struct SnapshotDomainReader: DomainReader {
         "ZWASMBLABELEDENTITYPROXY": ["Z_PK", "ZENTITYTYPE", "ZCONTACTJID", "ZENTITYKEY", "ZDATE"],
     ]
 
-    public func labels() throws -> (labels: [Label], snapshot: SnapshotInfo) {
+    public func labels() throws -> (labels: [Label], source: SourceInfo) {
         let (database, info) = try open(.labels, requires: Self.labelTables)
         return (try labelRows(database), info)
     }
@@ -294,7 +294,7 @@ public struct SnapshotDomainReader: DomainReader {
     }
 
     public func labeledEntities(labelID: Int64, limit: Int) throws
-        -> (label: Label?, entities: [LabeledEntity], snapshot: SnapshotInfo)
+        -> (label: Label?, entities: [LabeledEntity], source: SourceInfo)
     {
         let (database, info) = try open(.labels, requires: Self.labelTables)
         var entities: [LabeledEntity] = []
@@ -319,7 +319,7 @@ public struct SnapshotDomainReader: DomainReader {
     // MARK: Address book
 
     public func addressBook(matching query: AddressBookQuery) throws
-        -> (entries: [AddressBookEntry], snapshot: SnapshotInfo)
+        -> (entries: [AddressBookEntry], source: SourceInfo)
     {
         let (database, info) = try open(
             .contacts,
@@ -360,14 +360,14 @@ public struct SnapshotDomainReader: DomainReader {
     /// A LID or a phone number, with or without its `@…` suffix. Matches the stored value
     /// exactly or up to the `@`, because which form each table keeps is not established.
     public func lidLookup(_ value: String) throws
-        -> (matches: [LIDMatch], snapshots: [SnapshotInfo], notes: [String])
+        -> (matches: [LIDMatch], sources: [SourceInfo], notes: [String])
     {
         let bare = value.split(separator: "@", maxSplits: 1).first.map(String.init) ?? value
         guard !bare.isEmpty else {
             throw ToolError.badArgument(name: "value", reason: "give a LID or a phone number")
         }
         var matches: [LIDMatch] = []
-        var snapshots: [SnapshotInfo] = []
+        var sources: [SourceInfo] = []
         var notes: [String] = []
 
         let (lidDatabase, lidInfo) = try open(
@@ -376,7 +376,7 @@ public struct SnapshotDomainReader: DomainReader {
                 "ZWAPHONENUMBERLIDPAIR": ["ZLID", "ZPHONENUMBER"],
                 "ZWALIDPROPERTIES": ["ZLID", "ZDISPLAYNAME", "ZUSERNAME"],
             ])
-        snapshots.append(lidInfo)
+        sources.append(lidInfo)
         try lidDatabase.query(
             """
             SELECT ZLID, ZPHONENUMBER FROM ZWAPHONENUMBERLIDPAIR
@@ -414,7 +414,7 @@ public struct SnapshotDomainReader: DomainReader {
                         "contact_lid", "contact_pn", "contact_username", "contact_push_name",
                     ]
                 ])
-            snapshots.append(extendedInfo)
+            sources.append(extendedInfo)
             try extended.query(
                 """
                 SELECT contact_lid, contact_pn, contact_username, contact_push_name
@@ -430,18 +430,18 @@ public struct SnapshotDomainReader: DomainReader {
                         pushName: Self.nonEmpty(row.text(3)),
                         source: "ExtChatDB.contact_metadata"))
             }
-        } catch let failure as SnapshotError {
+        } catch let failure as SourceError {
             notes.append("ExtChatDB.contact_metadata was not searched: \(failure.message)")
         } catch let failure as ToolError {
             notes.append("ExtChatDB.contact_metadata was not searched: \(failure.message)")
         }
-        return (matches, snapshots, notes)
+        return (matches, sources, notes)
     }
 
     // MARK: Channels
 
     public func channels(name: String?, limit: Int) throws
-        -> (channels: [Channel], snapshot: SnapshotInfo)
+        -> (channels: [Channel], source: SourceInfo)
     {
         let (database, info) = try open(
             .extendedChat,

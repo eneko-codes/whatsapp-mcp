@@ -153,9 +153,11 @@ public enum ToolError: Error, Equatable {
 
                   \(path)
 
-                The file is opened read-only and immutable, so this is never a lock held
-                by WhatsApp. macOS did not report a permission refusal, so check that the
-                file is intact; if WhatsApp is mid-update, open it once and try again.
+                The file is opened read-only, which never blocks WhatsApp's own writes, so
+                this is not a lock WhatsApp holds. macOS did not report a permission
+                refusal, so check that the file is intact and that its -shm and -wal files,
+                if present, are readable; if WhatsApp is mid-update, open it once and try
+                again.
                 """
 
         case .schemaUnexpected(let missingTables):

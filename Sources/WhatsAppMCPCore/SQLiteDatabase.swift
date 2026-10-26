@@ -7,18 +7,31 @@ import SQLite3
 /// the same reason there is no argument parser: a dependency has to earn its place, and
 /// `import SQLite3` does this job in one import.
 ///
-/// The connection is opened with `mode=ro&immutable=1`, and both halves matter:
+/// The connection is opened `mode=ro`, and deliberately not `immutable=1`:
 ///
 /// - `mode=ro` refuses every write at the SQLite level rather than by convention. This
 ///   server reads someone's live chat history, and "we never call UPDATE" is a promise
 ///   the code makes to itself; a read-only handle is one the library enforces.
-/// - `immutable=1` tells SQLite the file cannot change underneath it, so it takes no
-///   locks, creates no `-shm`, and never touches the `-wal`. Without it, merely reading
-///   WhatsApp's database writes to its sidecar files and can block the app itself.
+///   `PRAGMA query_only` is set on top of it as a second, independent refusal.
+/// - Not `immutable=1`, because WhatsApp keeps its databases in WAL mode and the newest
+///   messages can sit only in the `-wal` file, which an immutable reader never looks at.
+///   `immutable=1` is also a promise to SQLite that nothing changes the file, which is
+///   false while WhatsApp runs; SQLite documents that it may then return incorrect
+///   results or `SQLITE_CORRUPT` (https://www.sqlite.org/uri.html).
 ///
-/// The cost of `immutable=1` is real and is reported rather than hidden: messages sitting
-/// in the write-ahead log that WhatsApp has not yet checkpointed are invisible here.
-/// `whatsapp_status` says so whenever a non-empty `-wal` is present.
+/// What reading the log costs is a shared lock on the `-shm` index for the length of one
+/// read transaction, and SQLite records the reader in that index — so the `-shm` file's
+/// bytes and modification time change when this server reads. It is a coordination file,
+/// never message data. In WAL mode a reader never blocks the writer, and a read-only
+/// connection cannot checkpoint.
+///
+/// SQLite documents when a read-only connection can open a WAL database: the `-shm` and
+/// `-wal` files exist and are readable, the directory is writable so they can be created,
+/// or the file is opened `immutable` (https://www.sqlite.org/wal.html). A `mode=ro`
+/// connection to a database whose sidecars are gone failed to open when tried, with
+/// `SQLITE_CANTOPEN`. Sidecars are gone only when no connection has the database open,
+/// which is the case whenever WhatsApp is not running, and then nothing is changing the
+/// file — exactly what `immutable=1` promises. So that, and only that, is when it is used.
 final class ReadOnlyDatabase {
     private let handle: OpaquePointer
 
@@ -57,20 +70,42 @@ final class ReadOnlyDatabase {
     }
 
     /// `file:` URI with the path percent-encoded, because the query string after `?` is
-    /// how the read-only and immutable flags are set at all. A raw path would be taken
-    /// literally and the flags would silently not apply.
-    static func uri(for path: String) -> String {
-        let encoded =
-            path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-        return "file:\(encoded)?mode=ro&immutable=1"
+    /// how the read-only flag is set at all. A raw path would be taken literally and the
+    /// flag would silently not apply.
+    ///
+    /// Everything outside an explicit unreserved set is encoded: `?` would start the query
+    /// string, `#` the fragment and `%` an escape, so a path containing one of them could
+    /// otherwise open a different file — or a writable one.
+    static func uri(for path: String, immutable: Bool = false) -> String {
+        let unreserved = CharacterSet(
+            charactersIn:
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/:@!$&'()*+,;=")
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: unreserved) ?? path
+        return "file:\(encoded)?mode=ro" + (immutable ? "&immutable=1" : "")
     }
 
-    init(path: String) throws {
+    /// Whether a connection currently has this database open in WAL mode. The `-shm` file
+    /// exists for exactly as long as one does.
+    static func hasJournalSidecars(path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path + "-wal")
+            && FileManager.default.fileExists(atPath: path + "-shm")
+    }
+
+    /// `mode=ro`, through the log, whenever another process has the file open; the
+    /// documented `immutable=1` fallback only when it demonstrably has not.
+    static func openingURI(for path: String) -> String {
+        uri(for: path, immutable: !hasJournalSidecars(path: path))
+    }
+
+    /// `readTransaction` begins a read transaction that lasts until the connection closes,
+    /// so every query on it sees one snapshot even while WhatsApp is writing. Connections
+    /// are short-lived here, so closing is what ends it.
+    init(path: String, readTransaction: Bool = false) throws {
         var connection: OpaquePointer?
         // FULLMUTEX because a connection is short-lived here but the MCP server is
         // asynchronous, and a serialised handle costs nothing measurable on a read.
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX
-        let code = sqlite3_open_v2(Self.uri(for: path), &connection, flags, nil)
+        let code = sqlite3_open_v2(Self.openingURI(for: path), &connection, flags, nil)
         guard code == SQLITE_OK, let connection else {
             let detail =
                 connection.map { String(cString: sqlite3_errmsg($0)) }
@@ -81,6 +116,15 @@ final class ReadOnlyDatabase {
             throw OpenFailure(code: extended, detail: detail, systemErrno: systemErrno)
         }
         handle = connection
+
+        if sqlite3_exec(connection, "PRAGMA query_only = ON", nil, nil, nil) != SQLITE_OK
+            || (readTransaction && sqlite3_exec(connection, "BEGIN", nil, nil, nil) != SQLITE_OK)
+        {
+            let detail = String(cString: sqlite3_errmsg(connection))
+            let extended = sqlite3_extended_errcode(connection)
+            sqlite3_close_v2(connection)
+            throw OpenFailure(code: extended, detail: detail)
+        }
 
         // Case-insensitive containment that also folds accents, which SQLite's own
         // `lower()` and `LIKE` do not: the system library is built without ICU, so both
@@ -176,7 +220,8 @@ final class ReadOnlyDatabase {
             case .notReadOnly: "the statement would change the database"
             case .timedOut: "the statement ran past its time limit and was stopped"
             case .blocked:
-                "the statement reads key material or raw protocol queues, which no tool here returns"
+                "the statement reads key material, raw protocol queues or a table the database "
+                    + "does not declare, which no tool here returns"
             case .failed(let detail): detail
             }
         }
@@ -196,8 +241,8 @@ final class ReadOnlyDatabase {
     ///   `sqlite3_stmt_readonly` reports `ATTACH` and `DETACH` as read-only (they alter the
     ///   connection, not the file) and would let them through;
     /// - `sqlite3_stmt_readonly` must agree, which catches `WITH … DELETE`;
-    /// - the connection itself is `mode=ro&immutable=1`, so a mistake in the two gates
-    ///   above still cannot write.
+    /// - the connection itself is `mode=ro` with `query_only` on, so a mistake in the two
+    ///   gates above still cannot write.
     ///
     /// A progress handler enforces the time limit: a cross join over WhatsApp's message
     /// table would otherwise hold the process for as long as it liked.
@@ -219,11 +264,22 @@ final class ReadOnlyDatabase {
         // closure returns, so the unparsed remainder is read inside it. Reading it later
         // sees freed memory, which looks like "nothing left" and lets a second statement
         // through.
-        // Columns and tables that hold key material or undecrypted protocol payloads are
-        // refused at prepare time, whatever the statement does with them — hex(), CAST and
-        // a subquery all go through the same read. See `blockedReads`.
-        sqlite3_set_authorizer(handle, authorizeRead, nil)
-        defer { sqlite3_set_authorizer(handle, nil, nil) }
+        // Tables the database does not declare are refused at prepare time, and so are
+        // columns and tables that hold key material or undecrypted protocol payloads,
+        // whatever the statement does with them — hex(), CAST and a subquery all go through
+        // the same read. See `ReadPolicy` and `blockedReads`.
+        // Read before the authorizer is installed, and from the connection itself, so the
+        // set is what this database declares and not what the caller's statement names.
+        var declared: Set<String> = ["sqlite_master", "sqlite_schema"]
+        try query("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')") { row in
+            if let name = row.text(0) { declared.insert(name.lowercased()) }
+        }
+        let policy = ReadPolicy(declaredTables: declared)
+        sqlite3_set_authorizer(handle, authorizeRead, Unmanaged.passUnretained(policy).toOpaque())
+        defer {
+            sqlite3_set_authorizer(handle, nil, nil)
+            withExtendedLifetime(policy) {}
+        }
 
         var prepared: OpaquePointer?
         var hasSecondStatement = false
@@ -462,16 +518,43 @@ let blockedReads: [(table: String, column: String?)] = [
     ("dbstat", nil),
 ]
 
+/// The tables a statement may read a column of: exactly those the database itself declares
+/// in `sqlite_master`, plus `sqlite_master`. An allow-list, because a block list is one
+/// forgotten name away from a leak. SQLite can be built with `SQLITE_ENABLE_DBPAGE_VTAB`,
+/// which adds `sqlite_dbpage`: the file's raw pages, every column of every table including
+/// the ones `blockedReads` refuses by name. The library this server links does not have it
+/// (checked with `sqlite3_compileoption_used`), but the system's own `sqlite3` tool does,
+/// so it is one library change away. `dbstat`, `bytecode`, `json_each` and the `pragma_*`
+/// functions are virtual tables the linked library does have. None is declared by the
+/// database, so no column of any of them is readable here.
+///
+/// A read that names no column — `SELECT count(*)` — is not refused for an undeclared name:
+/// SQLite reports it for a recursive CTE too, it exposes no content, and the table-level
+/// rules in `blockedReads` still apply to it.
+private final class ReadPolicy {
+    let declaredTables: Set<String>
+
+    init(declaredTables: Set<String>) {
+        self.declaredTables = declaredTables
+    }
+}
+
 /// `SQLITE_READ` is action 20; arguments 1 and 2 are the table and column. A bare C
-/// function with no captured state, as SQLite requires.
+/// function with no captured state, as SQLite requires; the policy arrives as its context.
 private let authorizeRead:
     @convention(c) (
         UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
         UnsafePointer<CChar>?, UnsafePointer<CChar>?
-    ) -> Int32 = { _, action, tableName, columnName, _, _ in
-        guard action == SQLITE_READ, let tableName else { return SQLITE_OK }
+    ) -> Int32 = { context, action, tableName, columnName, _, _ in
+        guard action == SQLITE_READ else { return SQLITE_OK }
+        // A read with no policy, or of a table with no name, is not one this server can vouch for.
+        guard let tableName, let context else { return SQLITE_DENY }
         let table = String(cString: tableName)
         let column = columnName.map { String(cString: $0) }
+        let policy = Unmanaged<ReadPolicy>.fromOpaque(context).takeUnretainedValue()
+        if column?.isEmpty == false, !policy.declaredTables.contains(table.lowercased()) {
+            return SQLITE_DENY
+        }
         let blocked = blockedReads.contains { rule in
             (rule.table == "*" || rule.table.caseInsensitiveCompare(table) == .orderedSame)
                 && (rule.column == nil

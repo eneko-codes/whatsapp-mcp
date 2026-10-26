@@ -4,15 +4,17 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.2.2"
+    public static let version = "1.5.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
-    /// once: that this server never changes WhatsApp and writes only its own cache, that
+    /// once: that this server never changes WhatsApp and keeps nothing, that
     /// the schema is undocumented, and what WhatsApp simply does not keep on this Mac.
     public static let instructions = """
-        Read access to WhatsApp on this Mac. This server never changes WhatsApp: it cannot \
-        write to, lock or delete anything in WhatsApp's container, cannot send, and has no \
-        route to WhatsApp's network or to any other network. On recent macOS, reading \
+        Read access to WhatsApp on this Mac. This server never changes WhatsApp's data: it \
+        cannot write, delete or send a message, and has no route to WhatsApp's network or to \
+        any other network. Reading a database in WAL mode does update that database's \
+        -shm index file, which SQLite uses to coordinate readers with the writer; it holds \
+        no messages. On recent macOS, reading \
         WhatsApp's container needs Full Disk Access for this server's program, and every \
         rebuilt or updated copy needs it again. whatsapp_status says whether macOS allowed \
         the read (and, if it refused, the exact steps), whether the chat database is \
@@ -20,20 +22,20 @@ public enum WhatsAppMCPServer {
         WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
         steps; it is not a missing file.
 
-        The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private \
-        copies of WhatsApp's databases (taken read-only, refreshed when WhatsApp changes \
-        the file), saved transcripts, and a scratch directory deleted after each conversion. \
-        That cache holds real message data in plaintext, owner-readable only, and stays \
-        until deleted; copies are emptied of key material as they are made.
+        It keeps nothing. The only file it makes is a scratch directory for converting \
+        audio, in ~/Library/Caches/whatsapp-mcp, deleted when the call ends; transcripts \
+        and database content are never stored — every database is read live, and a \
+        transcript exists only in the answer. db_query can read only the tables a \
+        database itself declares, and never key material.
 
         THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's private \
         storage, undocumented and free to change in any update. If a tool reports a missing \
         table or column, the reads are wrong and not merely empty — say so rather than \
         reporting that someone has no messages, calls or contacts.
 
-        The newest messages can be missing briefly: WhatsApp buffers writes in a journal \
-        this server does not read. whatsapp_status and every copy-based answer say when \
-        there were unwritten changes pending and when each copy was taken.
+        The newest messages are included: the databases are read through WhatsApp's \
+        write-ahead log. A message WhatsApp has not committed yet is not visible, and \
+        every answer from a database other than the chat store says when it was read.
 
         Workflow: chats_list to see what exists, chat_get for one conversation, \
         whatsapp_search across all of them (with starred_only=true and no phrase it lists \
@@ -81,19 +83,17 @@ public enum WhatsAppMCPServer {
         transcription: TranscriptionService? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
-        let cache = SnapshotCache(
-            containerDirectory: configuration.containerDirectory,
-            cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))
+        let databases = ContainerDatabases(containerDirectory: configuration.containerDirectory)
         let mediaFiles = MediaFiles(containerDirectory: configuration.containerDirectory)
         let tools = WhatsAppTools(
             store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
-            explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
-            reader: reader ?? SnapshotDomainReader(cache: cache),
+            explorer: explorer ?? LiveDatabaseExplorer(databases: databases),
+            reader: reader ?? LiveDomainReader(databases: databases),
             mediaFiles: mediaFiles,
             transcription: transcription
                 ?? TranscriptionService(
                     mediaFiles: mediaFiles,
-                    cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory),
+                    scratchDirectory: URL(fileURLWithPath: configuration.scratchDirectory),
                     converter: (configuration.ffmpegPath.map { URL(fileURLWithPath: $0) }
                         ?? FFmpegConverter.locate()).map { FFmpegConverter(executable: $0) },
                     engine: NativeSpeechTranscriber()))

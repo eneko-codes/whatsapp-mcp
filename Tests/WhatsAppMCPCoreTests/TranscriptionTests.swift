@@ -122,7 +122,7 @@ private struct TranscriptionFixture {
 
     func service(converter: FFmpegConverter?) -> TranscriptionService {
         TranscriptionService(
-            mediaFiles: MediaFiles(root: root), cacheDirectory: cache, converter: converter,
+            mediaFiles: MediaFiles(root: root), scratchDirectory: cache, converter: converter,
             engine: engine)
     }
 
@@ -178,8 +178,8 @@ struct TranscriptionTests {
         #expect(runs[0].contains("-nostdin"))
     }
 
-    @Test("A second request for the same audio comes from the cache and runs nothing")
-    func secondRequestIsCached() async throws {
+    @Test("A second request for the same audio recognises it again: nothing is cached")
+    func secondRequestRunsAgain() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
@@ -190,17 +190,16 @@ struct TranscriptionTests {
         _ = await run(tools, ["message_id": .int(7), "language": .string("es-ES")])
         let (again, isError) = await run(tools, ["message_id": .int(7), "language": .string("es-ES")])
         #expect(!isError)
-        #expect(again.contains("from this server's cache"))
-        #expect(fixture.engine.transcribeCount == 1)
-        #expect(fixture.ffmpegRuns().count == 1)
-
-        // A different language is a different recognition, so it is not served from cache.
-        _ = await run(tools, ["message_id": .int(7), "language": .string("en")])
+        #expect(!again.contains("cache"))
         #expect(fixture.engine.transcribeCount == 2)
+        #expect(fixture.ffmpegRuns().count == 2)
+
+        _ = await run(tools, ["message_id": .int(7), "language": .string("en")])
+        #expect(fixture.engine.transcribeCount == 3)
     }
 
-    @Test("The cache is keyed by content, so the same bytes under another name hit it")
-    func cacheKeyIsTheContentHash() async throws {
+    @Test("Nothing is kept: the same audio is recognised again, and no transcript is ever written")
+    func nothingIsStored() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let first = fixture.media.appendingPathComponent("a.opus")
@@ -210,13 +209,19 @@ struct TranscriptionTests {
         let service = fixture.service(converter: try fixture.fakeFFmpeg())
 
         _ = try await service.transcribe(file: first, language: "es")
-        let result = try await service.transcribe(file: second, language: "es")
-        #expect(result.fromCache)
-        #expect(fixture.engine.transcribeCount == 1)
+        _ = try await service.transcribe(file: second, language: "es")
+        #expect(fixture.engine.transcribeCount == 2)
+
+        // Whatever the scratch directory holds, nothing of the transcript is in it: only the
+        // (empty) folder the conversions are made in.
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: fixture.cache.path)) ?? []
+        #expect(entries.filter { $0 != "tmp" }.isEmpty, "\(entries)")
+        #expect(!FileManager.default.fileExists(
+            atPath: fixture.cache.appendingPathComponent("transcripts").path))
     }
 
-    @Test("The scratch WAV is deleted and the cache is private")
-    func scratchIsCleanedAndCacheIsPrivate() async throws {
+    @Test("The scratch WAV is deleted and the scratch directory is private")
+    func scratchIsCleanedAndPrivate() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
         let opus = fixture.media.appendingPathComponent("note.opus")
@@ -228,18 +233,14 @@ struct TranscriptionTests {
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: scratch.path)) ?? []
         #expect(leftovers.isEmpty, "scratch not cleaned: \(leftovers)")
 
-        let transcripts = fixture.cache.appendingPathComponent("transcripts")
-        let file = try #require(
-            FileManager.default.contentsOfDirectory(atPath: transcripts.path).first)
         func mode(_ url: URL) throws -> Int? {
             try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
         }
         #expect(try mode(fixture.cache) == 0o700)
-        #expect(try mode(transcripts) == 0o700)
-        #expect(try mode(transcripts.appendingPathComponent(file)) == 0o600)
+        #expect(try mode(scratch) == 0o700)
     }
 
-    @Test("Nothing is written outside the cache directory and the file is left as it was")
+    @Test("Nothing is written outside the scratch directory and the file is left as it was")
     func nothingElseIsWritten() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
@@ -328,7 +329,7 @@ struct TranscriptionTests {
         #expect(await waitUntil({ !isAlive(pidFile) }), "ffmpeg survived cancellation")
     }
 
-    @Test("A pre-existing cache directory keeps its mode; one this server creates is private")
+    @Test("A pre-existing scratch directory keeps its mode; one this server creates is private")
     func onlyCreatedDirectoriesAreChmodded() async throws {
         let fixture = try TranscriptionFixture()
         defer { fixture.remove() }
@@ -340,7 +341,7 @@ struct TranscriptionTests {
         try oggBytes("x").write(to: opus)
 
         let service = TranscriptionService(
-            mediaFiles: MediaFiles(root: fixture.root), cacheDirectory: shared,
+            mediaFiles: MediaFiles(root: fixture.root), scratchDirectory: shared,
             converter: try fixture.fakeFFmpeg(), engine: fixture.engine)
         _ = try await service.transcribe(file: opus, language: "es")
 
@@ -348,7 +349,6 @@ struct TranscriptionTests {
             try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int
         }
         #expect(try mode(shared) == 0o755, "an existing directory was chmodded")
-        #expect(try mode(shared.appendingPathComponent("transcripts")) == 0o700)
         #expect(try mode(shared.appendingPathComponent("tmp")) == 0o700)
     }
 
@@ -503,10 +503,10 @@ struct TranscriptionTests {
         #expect(text.contains("No speech was recognised"))
     }
 
-    @Test("The catalogue marks audio_transcribe as writing its cache, and says it never downloads")
+    @Test("The catalogue marks audio_transcribe as read-only, and says it never downloads")
     func annotationsAreHonest() {
         let tool = ToolCatalog.audioTranscribe
-        #expect(tool.annotations.readOnlyHint == false)
+        #expect(tool.annotations.readOnlyHint == true)
         #expect(tool.annotations.destructiveHint == false)
         #expect(tool.annotations.openWorldHint == false)
         #expect(tool.description?.contains("no language model is ever downloaded") == true)
@@ -551,7 +551,7 @@ struct FFmpegPinningTests {
         let url = shim.media.appendingPathComponent(file)
         try contents.write(to: url)
         let service = TranscriptionService(
-            mediaFiles: MediaFiles(root: shim.root), cacheDirectory: shim.cache,
+            mediaFiles: MediaFiles(root: shim.root), scratchDirectory: shim.cache,
             converter: try converter(shim), engine: shim.engine)
         let outcome: Result<Transcription, any Error>
         do { outcome = .success(try await service.transcribe(file: url, language: "es")) } catch {
@@ -620,7 +620,7 @@ struct FFmpegPinningTests {
         try Data("#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:2.0,\nfile://\(outside.path)\n#EXT-X-ENDLIST\n".utf8).write(to: playlist)
 
         let service = TranscriptionService(
-            mediaFiles: MediaFiles(root: shim.root), cacheDirectory: shim.cache,
+            mediaFiles: MediaFiles(root: shim.root), scratchDirectory: shim.cache,
             converter: FFmpegConverter(executable: ffmpeg), engine: shim.engine)
 
         let converted = try await service.transcribe(file: mka, language: "es")
@@ -702,7 +702,7 @@ struct NativeSpeechIntegrationTests {
         #expect(say.terminationStatus == 0)
 
         let service = TranscriptionService(
-            mediaFiles: MediaFiles(root: fixture.root), cacheDirectory: fixture.cache,
+            mediaFiles: MediaFiles(root: fixture.root), scratchDirectory: fixture.cache,
             converter: nil, engine: NativeSpeechTranscriber())
         let result = try await service.transcribe(file: url, language: "en-US")
         let text = result.segments.map(\.text).joined(separator: " ").lowercased()

@@ -83,7 +83,7 @@ public struct NativeSpeechTranscriber: SpeechTranscribing {
             for try await result in transcriber.results {
                 let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { continue }
-                // A time that is not a number cannot be encoded to the cache or read by a person.
+                // A time that is not a number cannot be encoded or read by a person.
                 let start = result.range.start.seconds
                 let end = result.range.end.seconds
                 segments.append(

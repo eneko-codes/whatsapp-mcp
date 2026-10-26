@@ -8,7 +8,7 @@ import MCP
 ///
 /// This server never changes WhatsApp. There is no sender, no shortcut and no Apple
 /// event anywhere beneath this type, so no tool routed here can reach outside this Mac;
-/// the only thing a tool writes is the server's own cache.
+/// the only file a tool makes is a scratch directory, deleted when the call ends.
 public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?
@@ -69,7 +69,7 @@ public struct WhatsAppTools: Sendable {
         if parameters.name == ToolCatalog.statusName {
             return format.status(
                 store.databaseInfo(), availability: store.availability(),
-                binaryPath: Self.binaryPath, snapshots: explorer?.existingSnapshots() ?? [])
+                binaryPath: Self.binaryPath)
         }
 
         // Before the chat-store check on purpose: db_* is how a broken chat store gets
@@ -365,45 +365,45 @@ public struct WhatsAppTools: Sendable {
                 query.newestFirst = try arguments.newestFirst()
                 query.limit = limit
                 query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
-                let (calls, snapshot) = try reader.calls(matching: query)
-                return format.calls(calls, snapshot: snapshot, limit: limit, offset: query.offset)
+                let (calls, source) = try reader.calls(matching: query)
+                return format.calls(calls, source: source, limit: limit, offset: query.offset)
 
             case ToolCatalog.locationSharingName:
-                let (sharing, snapshot) = try reader.locationSharing(limit: limit)
-                return format.locationSharing(sharing, snapshot: snapshot, limit: limit)
+                let (sharing, source) = try reader.locationSharing(limit: limit)
+                return format.locationSharing(sharing, source: source, limit: limit)
 
             case ToolCatalog.labelsName:
                 if let id = try arguments.optionalInt("label_id") {
-                    let (label, entities, snapshot) = try reader.labeledEntities(
+                    let (label, entities, source) = try reader.labeledEntities(
                         labelID: id, limit: limit)
                     guard let label else {
                         throw ToolError.badArgument(
                             name: "label_id", reason: "no label has id \(id); call labels_list without it")
                     }
-                    return format.labeledEntities(entities, label: label, snapshot: snapshot, limit: limit)
+                    return format.labeledEntities(entities, label: label, source: source, limit: limit)
                 }
-                let (labels, snapshot) = try reader.labels()
-                return format.labels(labels, snapshot: snapshot)
+                let (labels, source) = try reader.labels()
+                return format.labels(labels, source: source)
 
             case ToolCatalog.addressBookName:
                 var query = AddressBookQuery()
                 query.name = arguments.optionalString("name")
                 query.limit = limit
                 query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
-                let (entries, snapshot) = try reader.addressBook(matching: query)
-                return format.addressBook(entries, snapshot: snapshot, limit: limit, offset: query.offset)
+                let (entries, source) = try reader.addressBook(matching: query)
+                return format.addressBook(entries, source: source, limit: limit, offset: query.offset)
 
             case ToolCatalog.lidLookupName:
                 let value = try arguments.requiredString("value")
-                let (matches, snapshots, notes) = try reader.lidLookup(value)
-                return format.lidMatches(matches, value: value, snapshots: snapshots, notes: notes)
+                let (matches, sources, notes) = try reader.lidLookup(value)
+                return format.lidMatches(matches, value: value, sources: sources, notes: notes)
 
             default:
-                let (channels, snapshot) = try reader.channels(
+                let (channels, source) = try reader.channels(
                     name: arguments.optionalString("name"), limit: limit)
-                return format.channels(channels, snapshot: snapshot, limit: limit)
+                return format.channels(channels, source: source, limit: limit)
             }
-        } catch let failure as SnapshotError {
+        } catch let failure as SourceError {
             throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
@@ -419,25 +419,25 @@ public struct WhatsAppTools: Sendable {
         do {
             switch name {
             case ToolCatalog.dbTablesName:
-                let (entries, snapshot) = try explorer.tables(in: database)
-                return format.databaseTables(entries, snapshot: snapshot)
+                let (entries, source) = try explorer.tables(in: database)
+                return format.databaseTables(entries, source: source)
 
             case ToolCatalog.dbSchemaName:
-                let (statements, snapshot) = try explorer.schema(
+                let (statements, source) = try explorer.schema(
                     of: database, table: arguments.optionalString("table"))
-                return format.databaseSchema(statements, snapshot: snapshot)
+                return format.databaseSchema(statements, source: source)
 
             default:
                 let limit = try arguments.int(
-                    "limit", default: SnapshotDatabaseExplorer.defaultRowLimit,
-                    in: SnapshotDatabaseExplorer.rowLimitRange)
+                    "limit", default: LiveDatabaseExplorer.defaultRowLimit,
+                    in: LiveDatabaseExplorer.rowLimitRange)
                 let result = try explorer.select(
                     try arguments.requiredString("sql"), in: database, limit: limit)
                 return format.queryResult(result, limit: limit)
             }
         } catch let refusal as ReadOnlyDatabase.SelectRefusal {
             throw ToolError.queryRefused(refusal.detail)
-        } catch let failure as SnapshotError {
+        } catch let failure as SourceError {
             throw failure.toolError
         } catch let failure as ReadOnlyDatabase.QueryFailure {
             throw ToolError.storeFailure(failure.detail)
