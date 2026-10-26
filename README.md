@@ -235,10 +235,7 @@ schema change reading as an empty inbox would be the wrong kind of quiet failure
 
 That builds an arm64 (Apple silicon only) release binary and writes
 `dist/whatsapp-mcp.mcpb`. There is no `Info.plist` embedded; none has been needed so far (see
-[Frameworks and APIs](#frameworks-and-apis)). An ad-hoc signature (the default) runs, but it is a new
-program to macOS on every build, so Full Disk Access must be granted again each time. A stable
-identity (`MCPB_SIGN_IDENTITY`) keeps the grant — but never sign a binary you publish with a
-personal certificate, whose subject carries its holder's name.
+[Frameworks and APIs](#frameworks-and-apis)).
 
 ### 2. Install it
 
@@ -251,6 +248,22 @@ one keeps answering.
 Call `whatsapp_status`. It says `readable` when macOS lets the server open WhatsApp's database;
 `ACCESS DENIED` means Full Disk Access is missing (see [Permissions](#permissions)) and `NOT
 FOUND` means the file is not there — open WhatsApp for Mac at least once. For a video's sound, install `ffmpeg` (see [Prerequisites for transcription](#prerequisites-for-transcription)).
+
+### Signing
+
+An ad-hoc signature (the default) runs, but it is a new program to macOS on every build, so
+Full Disk Access must be granted again each time. A stable identity (`MCPB_SIGN_IDENTITY`)
+keeps the grant — but never sign a binary you publish with a personal certificate, whose
+subject carries its holder's name.
+
+### Preparing something to distribute
+
+```bash
+MCPB_SIGN_IDENTITY="Developer ID Application: …" ./scripts/pack.sh
+```
+
+A binary meant to run on someone else's Mac needs a real identity, and Full Disk Access is
+then granted by that person to that program.
 
 ## Tool switches
 
