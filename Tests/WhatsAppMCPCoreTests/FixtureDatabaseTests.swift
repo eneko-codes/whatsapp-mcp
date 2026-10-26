@@ -335,19 +335,78 @@ struct FixtureDatabaseTests {
 
     // MARK: Connection
 
-    @Test("The connection URI asks for both read-only and immutable, not read-only alone")
-    func connectionURIIsReadOnlyAndImmutable() {
-        // mode=ro alone still takes locks and can touch WhatsApp's own -wal; immutable=1
-        // is what stops this server from ever contending with WhatsApp's own writer. Both
-        // flags have to survive together, in the query string after `?` — a raw path
-        // would carry neither.
+    @Test("The chat store is read through the write-ahead log, and without it once WhatsApp quits")
+    func chatStoreIsReadThroughTheWAL() throws {
+        let fixture = try makeFixture()
+        defer { fixture.remove() }
+        let store = SystemWhatsAppStore(path: fixture.databasePath)
+        let before = try #require(store.databaseInfo().messageCount)
+
+        // A live writer, the way WhatsApp holds the file: WAL mode, automatic checkpoints
+        // off, so a row written now lives only in the `-wal`.
+        var writer: OpaquePointer?
+        #expect(sqlite3_open(fixture.databasePath, &writer) == SQLITE_OK)
+        defer { sqlite3_close(writer) }
+        try execute(writer!, "PRAGMA journal_mode = WAL")
+        try execute(writer!, "PRAGMA wal_autocheckpoint = 0")
+        try execute(
+            writer!,
+            "INSERT INTO ZWAMESSAGE (ZCHATSESSION, ZTEXT, ZISFROMME) VALUES (1, 'only in the log', 0)")
+
+        let mainFile = try Data(contentsOf: URL(fileURLWithPath: fixture.databasePath))
+        let info = store.databaseInfo()
+        #expect(info.messageCount == before + 1, "a row that exists only in the -wal must be read")
+        #expect((info.walBytes ?? 0) > 0)
+        // The main file holds the pre-WAL image, so the row really was not in it.
+        #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.databasePath)) == mainFile)
+
+        // WhatsApp quits: the last connection checkpoints, and the sidecars go.
+        sqlite3_close(writer)
+        writer = nil
+        try? FileManager.default.removeItem(atPath: fixture.databasePath + "-wal")
+        try? FileManager.default.removeItem(atPath: fixture.databasePath + "-shm")
+        #expect(store.databaseInfo().messageCount == before + 1)
+        #expect(!FileManager.default.fileExists(atPath: fixture.databasePath + "-shm"))
+    }
+
+    @Test("The connection URI is read-only and not immutable unless asked to be")
+    func connectionURIIsReadOnly() {
+        // immutable=1 skips the write-ahead log and hides the newest messages, and it is
+        // a promise that nothing changes the file, which is false while WhatsApp runs.
+        // The flag has to survive in the query string after `?` — a raw path would carry
+        // none.
         let uri = ReadOnlyDatabase.uri(for: "/invented/Group Containers/ChatStorage.sqlite")
-        #expect(uri.hasPrefix("file:"))
-        #expect(uri.contains("mode=ro"))
-        #expect(uri.contains("immutable=1"))
+        #expect(uri == "file:/invented/Group%20Containers/ChatStorage.sqlite?mode=ro")
+        #expect(!uri.contains("immutable"))
         // A real container path has a space in it; percent-encoding it wrong would open
         // the wrong file, or none at all, rather than merely losing a flag.
         #expect(uri.contains("Group%20Containers"))
+        #expect(
+            ReadOnlyDatabase.uri(for: "/invented/a.sqlite", immutable: true)
+                .hasSuffix("?mode=ro&immutable=1"))
+    }
+
+    @Test("A path with reserved characters cannot smuggle a different mode into the URI")
+    func connectionURIEncodesReservedCharacters() {
+        let uri = ReadOnlyDatabase.uri(for: "/tmp/evil?mode=rw#ChatStorage.sqlite")
+        #expect(uri.hasSuffix("?mode=ro"))
+        #expect(uri.components(separatedBy: "?").count == 2)
+        #expect(!uri.contains("#"))
+    }
+
+    @Test("immutable is used only when no process has the database open")
+    func immutableOnlyWithoutSidecars() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whatsapp-sidecars-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("ChatStorage.sqlite").path
+
+        #expect(ReadOnlyDatabase.openingURI(for: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-wal", contents: Data())
+        #expect(ReadOnlyDatabase.openingURI(for: path).hasSuffix("?mode=ro&immutable=1"))
+        FileManager.default.createFile(atPath: path + "-shm", contents: Data())
+        #expect(ReadOnlyDatabase.openingURI(for: path).hasSuffix("?mode=ro"))
     }
 
     @Test("A write through the connection is refused by SQLite itself, not by convention")

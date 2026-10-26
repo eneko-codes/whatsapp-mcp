@@ -5,7 +5,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 ## Data rule
 
 Nothing is ever written to, modified in or deleted from WhatsApp's container
-(`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared`), and no send capability exists. Do not print, log or commit real message text, contact names or phone numbers; prefer aggregate or structural queries over selecting rows.
+(`~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared`) by this server's own code, and no send capability exists. **One thing changes there regardless:** reading a database in WAL mode records the reader in that database's `-shm` index file, so its bytes and modification time change when this server reads (verified against a fixture). It is SQLite's reader/writer coordination file, holds no messages, and cannot be avoided without `immutable=1`, which hides the newest messages and is used only when no `-wal`/`-shm` pair exists. Do not "fix" this by reintroducing `immutable=1` for a live database. Do not print, log or commit real message text, contact names or phone numbers; prefer aggregate or structural queries over selecting rows.
 
 **Tests run against fakes** — in-memory doubles, fixtures, data invented for the test. Never the owner's real chat store, never the real cache, and never out of convenience: the suite exists to catch breaking changes and does not need real data to do that. A test that needs a cache directory passes its own temporary one.
 
@@ -17,7 +17,7 @@ The read path takes a database path, so the gentle route is a copy of the store 
 
 `~/Library/Caches/whatsapp-mcp/` (`--cache-directory` moves it, for manual runs and tests) and nowhere else — not WhatsApp's container, not the media files it reads, and no file of this server's own code goes to the system temporary directory. (SQLite and the Apple frameworks it calls may use the system's temporary files for their own transient work; that is theirs, not a write location of this server.) It holds:
 
-- **Copies of allow-listed WhatsApp databases** (`<Name>.sqlite`, with a `<Name>.stamp.json`), made with the SQLite online-backup API from a source opened `mode=ro&immutable=1` and refreshed when the source's modification time or size changes. While one is being written it exists as `<Name>.sqlite.tmp-<uuid>`. Before a copy is kept, everything `blockedReads` refuses (feature keys, media keys, key-value blobs, the protocol queues) is emptied in it with `secure_delete` on, planner statistics are dropped, and the copy is rebuilt with `VACUUM INTO` so that rows WhatsApp deleted long ago do not survive in free pages; if any step fails, the copy fails. Virtual (full-text) tables are skipped by the scrub: their tokenizers are not available here, and none of the blocked data is in one.
+- **Copies of allow-listed WhatsApp databases** (`<Name>.sqlite`, with a `<Name>.stamp.json`), made with the SQLite online-backup API from a source opened `mode=ro` (through its write-ahead log; `immutable=1` only when no `-wal`/`-shm` pair exists) and refreshed when the modification time or size of the source or its `-wal` changes. While one is being written it exists as `<Name>.sqlite.tmp-<uuid>`. Before a copy is kept, everything `blockedReads` refuses (feature keys, media keys, key-value blobs, the protocol queues) is emptied in it with `secure_delete` on, planner statistics are dropped, and the copy is rebuilt with `VACUUM INTO` so that rows WhatsApp deleted long ago do not survive in free pages; if any step fails, the copy fails. Virtual (full-text) tables are skipped by the scrub: their tokenizers are not available here, and none of the blocked data is in one.
 - **Transcripts** (`transcripts/<sha256>-<language>.json`), so the same audio is recognised once. `media_view` on a video writes one too when it is given a `language`.
 - **A scratch directory** (`tmp/<uuid>/`) for the WAV `ffmpeg` produces, deleted when the call ends. A process killed mid-call can leave one behind; it is safe to delete.
 
@@ -35,14 +35,14 @@ Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
 ## APIs
 
-- [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against WhatsApp's own databases, opened read-only and immutable through a [URI filename](https://www.sqlite.org/uri.html); `sqlite3_create_function_v2` for accent- and case-insensitive matching; `sqlite3_backup_*` for the cache copies; `sqlite3_set_authorizer` to refuse reads of key material in `db_query`; a progress handler and `SQLITE_LIMIT_LENGTH` to bound it.
+- [SQLite C API](https://www.sqlite.org/c3ref/intro.html) against WhatsApp's own databases, opened read-only through a [URI filename](https://www.sqlite.org/uri.html), read through their [write-ahead log](https://www.sqlite.org/wal.html); `sqlite3_create_function_v2` for accent- and case-insensitive matching; `sqlite3_backup_*` for the cache copies; `sqlite3_set_authorizer` to refuse reads of key material in `db_query`; a progress handler and `SQLITE_LIMIT_LENGTH` to bound it.
 - Apple frameworks, none of which needs a TCC permission as far as has been observed: `Speech` (`SpeechAnalyzer`/`SpeechTranscriber`, macOS 26 and later, on-device only), `AVFoundation`, `ImageIO`, `PDFKit`, `CryptoKit`, `UniformTypeIdentifiers`.
 - One local subprocess, `ffmpeg` (Homebrew's prefixes or `--ffmpeg`), for a video's sound track and containers `AVAudioFile` cannot open — on macOS 27 it opens Ogg Opus, MP3 and M4A itself, so those never reach ffmpeg (older versions are untested). It runs on one file with `-protocol_whitelist file`, and **the demuxer is never left to ffmpeg**: `MediaFormat` decides it from the first bytes, ffmpeg is told with `-f`, and anything else (a playlist, `.ffconcat`, `.sdp`) is refused before it starts — a playlist names other files that ffmpeg would read. Do not remove that.
 
 ## Surface not used
 
 - FTS and `MATCH`, the blob API, busy handlers.
-- Any write to WhatsApp's container, and any open of its *databases* other than `mode=ro&immutable=1`. Media files are opened for reading only, by the Apple frameworks and `ffmpeg`.
+- Any write to WhatsApp's container, and any open of its *databases* other than `mode=ro` (or `mode=ro&immutable=1` when no `-wal`/`-shm` pair exists). Media files are opened for reading only, by the Apple frameworks and `ffmpeg`.
 - Any network access, including a speech-model download: a locale that is supported but not installed is reported, never fetched.
 - A language fallback. A language the speech engine lacks (Basque, Catalan) is an error, never a transcript in another language.
 - **What can never be read**, by any tool, whatever it is called: `enc-key.dat`, `Axolotl*.sqlite`, Signal key material, `BotPKICRL*`, `*.lock`, `Logs`. Databases are an allow-list (`AllowedDatabase`), not a deny-list, and the caller names one, never a path. Inside the allowed databases, `blockedReads` refuses key columns and raw protocol queues at prepare time.

@@ -97,7 +97,7 @@ public enum StoreAvailability: Sendable, Equatable {
 /// makes the untested surface small enough to check by hand.
 ///
 /// Every method is a read, and this is the only seam there is. The store is opened
-/// read-only and immutable, so there is nothing here that could write even if a method
+/// read-only with `query_only` on, so there is nothing here that could write even if a method
 /// were added by mistake.
 public protocol WhatsAppStore: Sendable {
     func availability() -> StoreAvailability

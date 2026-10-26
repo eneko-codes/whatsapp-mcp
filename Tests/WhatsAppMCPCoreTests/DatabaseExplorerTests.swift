@@ -410,22 +410,36 @@ struct SnapshotCacheTests {
         #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma"])
     }
 
-    @Test("A change confined to the write-ahead log does not trigger a recopy")
-    func walOnlyChangeDoesNotRecopy() throws {
+    @Test("A change confined to the write-ahead log makes the copy stale, and is in the next one")
+    func walOnlyChangeIsCopied() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.contacts)
+
+        // A live writer, the way WhatsApp holds its databases: WAL mode, automatic
+        // checkpoints off, so what it writes after this point lives only in the `-wal`.
+        var writer: OpaquePointer?
+        #expect(sqlite3_open(fake.sourceURL(.contacts).path, &writer) == SQLITE_OK)
+        defer { sqlite3_close(writer) }
+        sqlite3_exec(writer, "PRAGMA journal_mode=WAL", nil, nil, nil)
+        sqlite3_exec(writer, "PRAGMA wal_autocheckpoint=0", nil, nil, nil)
+        sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('gamma')", nil, nil, nil)
+
         let cache = SnapshotCache(containerDirectory: fake.container, cacheDirectory: fake.cache)
         let first = try cache.snapshot(of: .contacts)
-
-        // The source is read immutable, so a WAL can never reach a copy.
-        try Data(repeating: 1, count: 4096).write(
-            to: URL(fileURLWithPath: fake.sourceURL(.contacts).path + "-wal"))
         #expect(cache.existingSnapshots().first?.stale == false)
+
+        let mainBefore = try Data(contentsOf: fake.sourceURL(.contacts))
+        sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('delta')", nil, nil, nil)
+        // Only the log changed: the main file is byte for byte what it was.
+        #expect(try Data(contentsOf: fake.sourceURL(.contacts)) == mainBefore)
+
+        #expect(cache.existingSnapshots().first?.stale == true)
         let second = try cache.snapshot(of: .contacts)
-        // JSON round-trips a Date to within a microsecond, so compare with a tolerance.
-        #expect(abs(second.info.copiedAt.timeIntervalSince(first.info.copiedAt)) < 0.001)
-        #expect(second.info.walPending == false, "the copy was taken before the WAL existed")
+        #expect(second.info.copiedAt > first.info.copiedAt)
+        let rows = try fake.explorer().select(
+            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10)
+        #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma", "delta"])
     }
 
     @Test("Refreshing a WAL-mode source leaves no stray sidecar files in the cache")

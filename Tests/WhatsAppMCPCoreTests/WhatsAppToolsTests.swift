@@ -141,7 +141,7 @@ struct WhatsAppToolsTests {
         let store = stocked()
         store.info = DatabaseInfo(
             path: "/invented/ChatStorage.sqlite", exists: true, size: 1024, modified: nil,
-            hasPendingWAL: false, missingTables: [],
+            missingTables: [],
             absentOptionalTables: ["ZWAMESSAGEDATAITEM"], chatCount: 4, messageCount: 3)
         let (text, isError) = await call(ToolCatalog.statusName, store: store)
         #expect(!isError)

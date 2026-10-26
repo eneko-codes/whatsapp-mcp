@@ -15,7 +15,7 @@ final class FakeWhatsAppStore: WhatsAppStore, @unchecked Sendable {
     var groupValue: [Int64: Group] = [:]
     var info = DatabaseInfo(
         path: "/invented/ChatStorage.sqlite", exists: true, size: 1024, modified: nil,
-        hasPendingWAL: false, missingTables: [], chatCount: 0, messageCount: 0)
+        missingTables: [], chatCount: 0, messageCount: 0)
 
     var failure: (any Error)?
 

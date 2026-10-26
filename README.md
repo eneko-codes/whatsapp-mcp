@@ -5,9 +5,10 @@
 # whatsapp-mcp
 
 A local MCP server, written in Swift, that gives Claude **read access** to WhatsApp on this
-Mac. It never changes WhatsApp.
+Mac. It never changes WhatsApp's data.
 
-Reads come from WhatsApp's own local SQLite databases, opened read-only and immutable, and
+Reads come from WhatsApp's own local SQLite databases, opened read-only and read through
+their write-ahead log, and
 from the media files under WhatsApp's `Message/` folder. There is no tool here that sends,
 edits or deletes anything — no shortcut, no Apple event, and no route to WhatsApp's network
 or to any other. The goal is the opposite one: to get as much out of what WhatsApp already
@@ -89,8 +90,8 @@ macOS asks, grant it.
 
 | Used | For | Reference |
 |---|---|---|
-| SQLite C API — `sqlite3_open_v2`, prepared statements, `sqlite3_create_function_v2` | Every read, over `file:…?mode=ro&immutable=1`; `wa_contains` does accent- and case-insensitive matching | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
-| `sqlite3_backup_*` | The cache copies, read from the immutable source into a file this server owns | [Online backup API](https://www.sqlite.org/backup.html) |
+| SQLite C API — `sqlite3_open_v2`, prepared statements, `sqlite3_create_function_v2` | Every read, over `file:…?mode=ro`, inside one read transaction, with `PRAGMA query_only` on; `wa_contains` does accent- and case-insensitive matching | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
+| `sqlite3_backup_*` | The cache copies, read through the source's log into a file this server owns | [Online backup API](https://www.sqlite.org/backup.html) |
 | `sqlite3_set_authorizer`, progress handler, `SQLITE_LIMIT_LENGTH` | Keeping `db_query` away from key material and bounding its cost | [Authorizer](https://www.sqlite.org/c3ref/set_authorizer.html) |
 | `Speech` — `SpeechAnalyzer`, `SpeechTranscriber` (macOS 26+) | On-device transcription; no server path, no model download | [Speech](https://developer.apple.com/documentation/speech) |
 | Protocol-buffers wire format, read by hand (`ProtobufWire`; no library) | A message's reactions (`ZWAMESSAGEINFO.ZRECEIPTINFO`) and the quote inside a reply (`ZWAMEDIAITEM.ZMETADATA`). WhatsApp publishes no schema, so an unrecognised shape yields nothing rather than a guess | [Encoding](https://protobuf.dev/programming-guides/encoding/) |
@@ -111,7 +112,7 @@ and cannot be reached by any name or path.
 ## The cache
 
 `~/Library/Caches/whatsapp-mcp/` holds copies of WhatsApp's databases (refreshed when the
-source file changes), saved transcripts, and a scratch folder deleted after each conversion.
+source file or its `-wal` changes), saved transcripts, and a scratch folder deleted after each conversion.
 It is **real message data in plaintext**, readable only by your user, and it stays until you
 delete it — remove the folder to remove it all. `--cache-directory` moves it. A copy is
 emptied, as it is made, of the key material `db_query` refuses to return (feature keys, media
@@ -174,13 +175,26 @@ plaintext copies of your WhatsApp data and is not removed with the extension).
 **Reading WhatsApp needs Full Disk Access** — see [Permissions](#permissions). Without it the
 server says so, with the steps, instead of reporting a missing file.
 
-**The newest messages can be briefly invisible.** The database is opened
-`mode=ro&immutable=1`: read-only alone still takes locks and can touch the write-ahead log,
-and WhatsApp is a running app with its own writer this server must never contend with.
-Immutable means SQLite promises never to look at unflushed writes, so a message that just
-arrived can be missing for a moment. `whatsapp_status` reports pending WAL content rather
-than letting that look like data loss — call it again after a moment if a message you expect
-is not there yet.
+**The databases are opened `mode=ro`, and deliberately not `immutable=1`.** WhatsApp keeps
+them in WAL mode, so the newest messages can sit only in the `-wal` file; an immutable
+reader never looks there and would miss them. `immutable=1` is also a promise to SQLite
+that nothing changes the file, which is false while WhatsApp runs — SQLite documents that
+it may then return incorrect results or `SQLITE_CORRUPT`. A read-only reader takes a shared
+lock for the length of one short transaction; in WAL mode that never blocks WhatsApp's own
+writes, and a read-only connection cannot checkpoint. `PRAGMA query_only` is on for every
+connection as a second refusal to write.
+
+**Reading updates one WhatsApp file.** SQLite records every reader in the database's `-shm`
+index, so that file's bytes and modification time change when this server reads. It is a
+coordination file shared between WhatsApp and its readers, and holds no messages. Nothing
+else in WhatsApp's container is written.
+
+**When WhatsApp is not running** its databases have no `-wal` or `-shm` file. A `mode=ro`
+connection could not open one without them in testing, and with nothing running there is
+nothing to read from the log and nothing that can change the file — exactly what
+`immutable=1` promises, and one of the three documented ways to open a WAL database
+read-only. That case, and only that case, uses `immutable=1`, so reading creates no file
+beside WhatsApp's own. `whatsapp_status` reports the size of the log.
 
 **The schema is undocumented, and checked rather than assumed.** WhatsApp's local storage is
 private and free to change shape in any update. If it ever stops matching what these tools
@@ -261,8 +275,10 @@ display name collide.
 
 - **No LID→phone-number mapping exists in the chat database.** A `…@lid` sender this server
   cannot name stays a LID there; `lid_lookup` may find a pairing elsewhere, or nothing.
-- **A copy is only as new as the source file.** WhatsApp's journal is never read, so the
-  newest rows can be missing from a copy; every answer says when its copy was taken.
+- **A copy is only as new as its last refresh.** A copy is retaken when the source or its
+  log has changed, which for a busy database means a new copy — the database's own size,
+  not the log's — after each change. A transaction WhatsApp has not committed yet is not in
+  one; every answer says when its copy was taken.
 - **Transcripts can be wrong**, and are labelled automatic. Basque and Catalan are refused.
 - **Status updates have no tool**, because their database's structure could not be verified.
 - **No disappearing-message setting is exposed**, because none exists in WhatsApp's local

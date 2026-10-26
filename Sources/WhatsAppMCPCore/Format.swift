@@ -48,12 +48,11 @@ public struct Format: Sendable {
         if let modified = info.modified {
             lines.append("  last written: \(DateParsing.roundTrip(modified, calendar: calendar))")
         }
-        // Worth stating plainly: this server opens the file read-only and immutable, so
-        // it cannot lock the database or disturb WhatsApp's own writes.
-        lines.append("  opened: read-only and immutable — this server can never write to it")
-        if info.hasPendingWAL {
-            lines.append(
-                "  note: WhatsApp has unwritten changes pending; the newest messages may not appear yet")
+        // Worth stating plainly: this server opens the file read-only, through its
+        // write-ahead log, so it never writes a message and the newest ones are included.
+        lines.append("  opened: read-only, through the write-ahead log — this server can never write to it")
+        if let wal = info.walBytes, wal > 0 {
+            lines.append("  write-ahead log: \(wal) bytes, read on every call")
         }
         if let chats = info.chatCount { lines.append("  chats: \(chats)") }
         if let messages = info.messageCount { lines.append("  messages: \(messages)") }
@@ -87,7 +86,6 @@ public struct Format: Sendable {
             var line =
                 "  \(snapshot.database.rawValue): copied \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
             if snapshot.stale { line += " — STALE, the source has changed since" }
-            if snapshot.walPending { line += " — WhatsApp had unwritten changes pending" }
             lines.append(line)
         }
 
@@ -114,10 +112,7 @@ public struct Format: Sendable {
     // MARK: Raw databases
 
     func snapshotLine(_ snapshot: SnapshotInfo) -> String {
-        var line =
-            "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
-        if snapshot.walPending { line += " · WhatsApp had unwritten changes pending, not in the copy" }
-        return line
+        "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
     }
 
     public func databaseTables(_ entries: [TableEntry], snapshot: SnapshotInfo) -> String {

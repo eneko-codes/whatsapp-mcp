@@ -73,10 +73,6 @@ public struct SnapshotInfo: Sendable, Equatable {
     public let copiedAt: Date
     /// Modification time of WhatsApp's `.sqlite` when the copy was taken.
     public let sourceModified: Date
-    /// True when a non-empty `-wal` sat beside the source at that moment. The source is
-    /// read `immutable=1`, so its write-ahead log is never applied and rows WhatsApp has
-    /// not yet checkpointed are not in the copy.
-    public let walPending: Bool
     /// True when the source has changed since the copy was taken.
     public let stale: Bool
 }
@@ -112,16 +108,19 @@ public enum SnapshotError: Error, Equatable {
 ///
 /// This is the only place this server writes, and it writes only under `cacheDirectory`
 /// (`~/Library/Caches/whatsapp-mcp` by default). Nothing is ever written into WhatsApp's
-/// container: the source is opened `mode=ro&immutable=1` exactly like the chat store, so
-/// copying takes no lock and creates no `-shm` beside WhatsApp's own files. Rows still in
-/// the source's write-ahead log are not in a copy; that is reported, not hidden. The cost is the
-/// same as everywhere else here and is reported in `SnapshotInfo.walPending`.
+/// container: the source is opened `mode=ro` exactly like the chat store, through its
+/// write-ahead log, so a copy holds everything WhatsApp had committed when the backup ran.
+/// What that costs is the same as everywhere else here: a read lock on the source's `-shm`
+/// index, which SQLite also records the reader in. When nothing has the source open there
+/// are no sidecars and the documented `immutable=1` fallback is used (see
+/// `ReadOnlyDatabase`), so copying a database WhatsApp is not running on creates nothing
+/// beside it.
 ///
 /// The cache holds real message data in plaintext, so the directory is `0700` and every
 /// copy `0600`: it must not be readable by another user of this Mac.
 ///
-/// A copy is refreshed when the modification time or size of the source `.sqlite` differs
-/// from the one recorded when it was taken. A struct with no mutable state:
+/// A copy is refreshed when the modification time or size of the source `.sqlite` or its
+/// `-wal` differs from the one recorded when it was taken. A struct with no mutable state:
 /// concurrent refreshes write to a uniquely named temporary file and rename it into place,
 /// so the worst case is two identical copies, never a half-written one.
 public struct SnapshotCache: Sendable {
@@ -159,9 +158,7 @@ public struct SnapshotCache: Sendable {
         }
 
         try copyDatabase(from: source, to: copy, database: database)
-        let record = Record(
-            stamp: current, copiedAt: Date(), walPending: Self.hasWAL(beside: source),
-            scrubVersion: Self.scrubVersion)
+        let record = Record(stamp: current, copiedAt: Date(), scrubVersion: Self.scrubVersion)
         try writeRecord(record, for: database)
         return (copy, info(record, database: database, stale: false))
     }
@@ -222,39 +219,38 @@ public struct SnapshotCache: Sendable {
 
     // MARK: Staleness record
 
-    /// Deliberately the `.sqlite` alone. The source is read `immutable`, so what sits in
-    /// its `-wal` can never reach a copy: stamping the WAL would recopy a multi-gigabyte
-    /// file on every incoming message and produce a copy identical to the last one.
+    /// The `.sqlite` and its `-wal`. The source is read through the log, so a message that
+    /// is only in the `-wal` is in the copy and must make it stale: stamping the main file
+    /// alone would keep serving a copy that is missing everything since the last checkpoint.
+    /// The cost is a new copy — the database's own size, not the log's — after each change.
+    /// A record written before the log was stamped has no such fields and so never decodes,
+    /// which makes it stale, as intended.
     struct Stamp: Equatable, Codable {
         var sqliteModified: Double
         var sqliteSize: Int64
+        var walModified: Double
+        var walSize: Int64
     }
 
     struct Record: Codable {
         var stamp: Stamp
         var copiedAt: Date
-        var walPending: Bool
         /// Which scrubbing rules produced the copy. A copy made by an older version, or
         /// before there was any scrubbing, is stale however unchanged its source is.
         var scrubVersion: Int
     }
 
     /// Bump whenever `blockedReads` or the way a copy is cleaned changes.
-    static let scrubVersion = 2
+    static let scrubVersion = 3
 
     static func stamp(of source: URL) -> Stamp {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: source.path)
+        let main = try? FileManager.default.attributesOfItem(atPath: source.path)
+        let log = try? FileManager.default.attributesOfItem(atPath: source.path + "-wal")
         return Stamp(
-            sqliteModified: (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
-            sqliteSize: (attributes?[.size] as? NSNumber)?.int64Value ?? 0)
-    }
-
-    /// True when a `-wal` with bytes in it sits beside the source. A WAL WhatsApp has fully
-    /// checkpointed but not truncated also counts, so this can over-report.
-    static func hasWAL(beside source: URL) -> Bool {
-        let wal = URL(fileURLWithPath: source.path + "-wal")
-        let size = (try? FileManager.default.attributesOfItem(atPath: wal.path))?[.size]
-        return ((size as? NSNumber)?.int64Value ?? 0) > 0
+            sqliteModified: (main?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
+            sqliteSize: (main?[.size] as? NSNumber)?.int64Value ?? 0,
+            walModified: (log?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
+            walSize: (log?[.size] as? NSNumber)?.int64Value ?? 0)
     }
 
     private func recordURL(for database: AllowedDatabase) -> URL {
@@ -279,15 +275,15 @@ public struct SnapshotCache: Sendable {
         SnapshotInfo(
             database: database, copiedAt: record.copiedAt,
             sourceModified: Date(timeIntervalSince1970: record.stamp.sqliteModified),
-            walPending: record.walPending, stale: stale)
+            stale: stale)
     }
 
     // MARK: Copy
 
-    /// SQLite's online-backup API, reading the source `immutable` and writing a file this
-    /// process created. Immutable means no lock is taken, so there is no guarantee against
-    /// WhatsApp checkpointing while the copy runs; the stamp is taken first, so a source that
-    /// changed meanwhile is simply copied again on the next call.
+    /// SQLite's online-backup API, reading the source through its log and writing a file this
+    /// process created. The backup is one read transaction on the source, so the copy is a
+    /// consistent snapshot; the stamp is taken first, so a source that changed meanwhile is
+    /// simply copied again on the next call.
     private func copyDatabase(from source: URL, to destination: URL, database: AllowedDatabase)
         throws
     {
@@ -336,7 +332,7 @@ public struct SnapshotCache: Sendable {
             var sourceHandle: OpaquePointer?
             guard
                 sqlite3_open_v2(
-                    ReadOnlyDatabase.uri(for: source.path), &sourceHandle,
+                    ReadOnlyDatabase.openingURI(for: source.path), &sourceHandle,
                     SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK, let sourceHandle
             else {
                 let detail = sourceHandle.map { String(cString: sqlite3_errmsg($0)) } ?? "open failed"
@@ -374,8 +370,9 @@ public struct SnapshotCache: Sendable {
                 throw fail(String(cString: sqlite3_errstr(stepCode == SQLITE_DONE ? finishCode : stepCode)))
             }
 
-            // The page header copied from WhatsApp says "WAL mode". The copy is read
-            // `immutable`, so give it a plain rollback journal and no sidecar files.
+            // The page header copied from WhatsApp says "WAL mode". The copy is only ever
+            // replaced by a rename, never written in place, so give it a plain rollback
+            // journal and no sidecar files.
             sqlite3_exec(destinationHandle, "PRAGMA journal_mode=DELETE", nil, nil, nil)
             do { try Self.scrubKeyMaterial(destinationHandle) } catch let failure as SnapshotError {
                 throw failure
