@@ -3,10 +3,10 @@ import Foundation
 /// Reading needs no configuration. The per-tool allow/ask/prohibit switch in Claude
 /// Desktop is the whole of this server's configuration surface.
 ///
-/// `--database`, `--cache-directory` and `--ffmpeg` are the flags parsed from the command
+/// `--database`, `--scratch-directory` and `--ffmpeg` are the flags parsed from the command
 /// line, and none is a `user_config` setting — nothing in `extension/manifest.json` sets
 /// them. The first two exist for manual verification, so a run can be pointed at a copy of
-/// the container and at a throwaway cache instead of the live ones; `--ffmpeg` names the
+/// the container and at a throwaway scratch directory instead of the live ones; `--ffmpeg` names the
 /// converter when it is not in one of Homebrew's two prefixes.
 public struct Configuration: Sendable, Equatable {
     /// Default page size for `chats_list`, `chat_get`, `whatsapp_search` and `media_list`.
@@ -17,10 +17,10 @@ public struct Configuration: Sendable, Equatable {
     /// run can be pointed elsewhere without the live file ever being opened.
     public var databasePath: String = Configuration.defaultDatabasePath
 
-    /// Where transcripts and the scratch folder are kept — the only place this server
-    /// writes. No database content goes there. Overridable from the command line so a
-    /// manual run or a test never touches the real cache.
-    public var cacheDirectory: String = ContainerDatabases.defaultCacheDirectory.path
+    /// Where the scratch folder for audio conversion is made — the only place this server
+    /// writes, and nothing stays there between calls. Overridable from the command line so a
+    /// manual run or a test never touches the real one.
+    public var scratchDirectory: String = ContainerDatabases.defaultScratchDirectory.path
 
     /// The `ffmpeg` that converts what macOS cannot open itself: a video's sound track and
     /// containers like Matroska.
@@ -89,11 +89,11 @@ public struct Configuration: Sendable, Equatable {
                 }
                 index += 2
 
-            case "--cache-directory":
+            case "--scratch-directory":
                 if let value, !isPlaceholder(value) {
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
-                        configuration.cacheDirectory = (trimmed as NSString).expandingTildeInPath
+                        configuration.scratchDirectory = (trimmed as NSString).expandingTildeInPath
                     }
                 }
                 index += 2

@@ -48,9 +48,6 @@ public enum AllowedDatabase: String, CaseIterable, Sendable {
         }
     }
 
-    /// Where the copy lives, flat inside the cache directory.
-    var cacheFileName: String { "\(rawValue).sqlite" }
-
     /// Names in the container that must never be copied or read, whatever else changes.
     /// Not consulted to decide what is allowed — the enum does that — but asserted against
     /// every case by a test, so adding a database to the list cannot reintroduce one.
@@ -118,9 +115,8 @@ public struct ContainerDatabases: Sendable {
         self.containerDirectory = containerDirectory
     }
 
-    /// Where this server keeps what it writes: transcripts and a scratch directory. No
-    /// database content.
-    public static var defaultCacheDirectory: URL {
+    /// Where this server makes its scratch directories. Nothing stays there between calls.
+    public static var defaultScratchDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/whatsapp-mcp")
     }
@@ -155,8 +151,8 @@ public struct ContainerDatabases: Sendable {
     }
 }
 
-/// Leftovers a killed process can leave in the cache directory.
-enum CacheSweep {
+/// Leftovers a killed process can leave in the scratch directory.
+enum ScratchSweep {
 
     /// How old a scratch directory must be before it is taken for a dead process's. Another
     /// instance may be converting audio in the same directory.
@@ -164,7 +160,7 @@ enum CacheSweep {
 
     /// Removes `tmp/<uuid>` scratch directories a killed process left behind. `SIGKILL` and a
     /// power cut run no cleanup, so this is the only thing that ever deletes them.
-    static func sweepStaleTemporaries(in directory: URL, now: Date = Date()) {
+    static func sweepStaleDirectories(in directory: URL, now: Date = Date()) {
         let fileManager = FileManager.default
         func modified(_ url: URL) -> Date? {
             (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate

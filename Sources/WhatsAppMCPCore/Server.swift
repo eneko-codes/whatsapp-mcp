@@ -4,10 +4,10 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.4.0"
+    public static let version = "1.5.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
-    /// once: that this server never changes WhatsApp and writes only its own cache, that
+    /// once: that this server never changes WhatsApp and keeps nothing, that
     /// the schema is undocumented, and what WhatsApp simply does not keep on this Mac.
     public static let instructions = """
         Read access to WhatsApp on this Mac. This server never changes WhatsApp's data: it \
@@ -22,10 +22,11 @@ public enum WhatsAppMCPServer {
         WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
         steps; it is not a missing file.
 
-        The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: saved \
-        transcripts and a scratch directory deleted after each conversion. No database \
-        content is copied or kept; every database is read live. db_query can read only \
-        the tables a database itself declares, and never key material.
+        It keeps nothing. The only file it makes is a scratch directory for converting \
+        audio, in ~/Library/Caches/whatsapp-mcp, deleted when the call ends; transcripts \
+        and database content are never stored — every database is read live, and a \
+        transcript exists only in the answer. db_query can read only the tables a \
+        database itself declares, and never key material.
 
         THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's private \
         storage, undocumented and free to change in any update. If a tool reports a missing \
@@ -92,7 +93,7 @@ public enum WhatsAppMCPServer {
             transcription: transcription
                 ?? TranscriptionService(
                     mediaFiles: mediaFiles,
-                    cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory),
+                    scratchDirectory: URL(fileURLWithPath: configuration.scratchDirectory),
                     converter: (configuration.ffmpegPath.map { URL(fileURLWithPath: $0) }
                         ?? FFmpegConverter.locate()).map { FFmpegConverter(executable: $0) },
                     engine: NativeSpeechTranscriber()))

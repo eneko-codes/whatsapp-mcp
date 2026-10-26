@@ -46,12 +46,19 @@ public struct MediaFiles: Sendable {
         public var sha256: String
     }
 
-    /// Size and SHA-256, hashed in chunks so a large video is never held in memory.
-    public static func facts(of url: URL) throws -> FileFacts {
+    /// A regular file macOS lets this process open. A refusal is reported as one — with the
+    /// path, so the reader looks at the permission — before anything downstream can call the
+    /// file "not audio" or "not an image".
+    public static func requireRegularFile(_ url: URL) throws {
         try requireReadable(url)
         guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
             throw ViewError.unreadable("not a regular file")
         }
+    }
+
+    /// Size and SHA-256, hashed in chunks so a large video is never held in memory.
+    public static func facts(of url: URL) throws -> FileFacts {
+        try requireRegularFile(url)
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()

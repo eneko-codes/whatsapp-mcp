@@ -92,9 +92,7 @@ final class ReadOnlyDatabase {
     }
 
     /// `mode=ro`, through the log, whenever another process has the file open; the
-    /// documented `immutable=1` fallback only when it demonstrably has not. A private copy
-    /// in the cache has no sidecars, so it is opened immutable, which changes nothing: this
-    /// server is the only thing that replaces it, and it does so by renaming a new file in.
+    /// documented `immutable=1` fallback only when it demonstrably has not.
     static func openingURI(for path: String) -> String {
         uri(for: path, immutable: !hasJournalSidecars(path: path))
     }

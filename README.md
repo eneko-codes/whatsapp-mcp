@@ -21,10 +21,12 @@ The tools. The chat store: `whatsapp_status`, `chats_list`, `chat_get`,
 And a read-only escape hatch over any allow-listed database: `db_tables`, `db_schema`,
 `db_query`.
 
-**It writes in exactly one place**: `~/Library/Caches/whatsapp-mcp/`, its own cache — see
-[The cache](#the-cache) — and no database content goes there. Nothing is written into
-WhatsApp's container; the one thing a read changes there is a database's `-shm` index file,
-explained in [the rules](#the-rules-worth-knowing-before-you-use-it).
+**It keeps nothing.** The only file it ever makes is a scratch folder for converting audio,
+in `~/Library/Caches/whatsapp-mcp/`, deleted when the call ends — see
+[The scratch folder](#the-scratch-folder). No database content and no transcript is stored.
+Nothing is written into WhatsApp's container; the one thing a read changes there is a
+database's `-shm` index file, explained in
+[the rules](#the-rules-worth-knowing-before-you-use-it).
 
 A message reads as what it is — text with its mentions resolved, a photo, a voice note with
 its length, a sticker, a document, a shared location with its coordinates, a shared contact
@@ -60,7 +62,7 @@ and macOS ties that grant to the exact program: every rebuilt or updated copy ne
 | `group_get` | read | A group's own metadata (created when, by whom, name last changed) and every member row with its address, resolved name and admin flag. |
 | `media_get` | read | The facts about the file behind an attachment: real path under `Message/`, MIME type, exact size, SHA-256, chat, sender and date. Says so when the file is not on this Mac. |
 | `media_view` | read | What is inside an attachment: a photo, sticker or GIF as an image reduced to 1568 px, a PDF or text document as text (a scan says it has no text layer), a video as still frames. |
-| `audio_transcribe` | **writes its cache** | A voice note, audio file or a video's sound as text with times, using macOS's on-device speech recognition. Needs the language as a full tag; Basque and Catalan are not supported and are refused, not guessed. |
+| `audio_transcribe` | read | A voice note, audio file or a video's sound as text with times, using macOS's on-device speech recognition. Needs the language as a full tag; Basque and Catalan are not supported and are refused, not guessed. |
 | `calls_list` | read | Calls from `CallHistory`: when, how long, direction, missed, video or voice, group, participants. The outcome is the stored number, not a guessed word. |
 | `location_sharing_list` | read | Live-location sharing sessions you started and who they went to. Coordinates are not decoded. |
 | `labels_list` | read | WhatsApp Business labels, and what carries each. |
@@ -69,14 +71,12 @@ and macOS ties that grant to the exact program: every rebuilt or updated copy ne
 | `channels_list` | read | Channels this Mac knows about. |
 | `db_tables`, `db_schema`, `db_query` | read | Tables, structure, and one `SELECT` against any allow-listed database. Rows and time are capped; only tables the database itself declares can be read, and key material and raw protocol queues are refused. |
 
-No tool changes WhatsApp. Two write the cache, and the `readOnlyHint` they declare is about
-WhatsApp and the files it keeps, not about the cache: `audio_transcribe` declares itself not
-read-only because storing its result is the point, and `media_view` on a video writes a
-transcript when it is given a `language`. Every tool that reads a database (`db_*`,
-`calls_list`, `location_sharing_list`, `labels_list`, `address_book_list`, `lid_lookup`,
-`channels_list`) reads it live, copies nothing and says when it was read. A test walks the
-catalogue and fails if any tool other than `audio_transcribe` stops declaring itself
-read-only; it does not check which tools write the cache, so this paragraph is what says so.
+No tool changes WhatsApp, and none keeps anything: every tool declares itself read-only, and
+a test walks the catalogue and fails if one stops. `audio_transcribe` and `media_view` on a
+video make a scratch folder while they convert audio and delete it before they answer; the
+transcript exists only in the answer. Every tool that reads a database (`db_*`, `calls_list`,
+`location_sharing_list`, `labels_list`, `address_book_list`, `lid_lookup`, `channels_list`)
+reads it live, copies nothing and says when it was read.
 
 Not covered: WhatsApp **status updates** — the structure of that database could not be
 verified, so there is no tool for it (`db_query` can reach it). There is deliberately no
@@ -110,17 +110,21 @@ A fixed list, by name — the caller never supplies a path: `ChatStorage`, `Cont
 Encryption keys (`enc-key.dat`, `Axolotl*`), `BotPKICRL*`, lock files and logs are not on it
 and cannot be reached by any name or path.
 
-## The cache
+## The scratch folder
 
-`~/Library/Caches/whatsapp-mcp/` holds saved transcripts and a scratch folder deleted after
-each conversion. A transcript is the text of one of your voice notes, readable only by your
-user, and it stays until you delete it — remove the folder to remove it all.
-`--cache-directory` moves it. **No database content is copied or kept**: every database is
-read live. Versions before 1.4.0 kept scrubbed copies of WhatsApp's databases here
-(`<Name>.sqlite` and `<Name>.stamp.json`); they were real message data in plaintext, nothing
-reads them any more, and they are not removed by an update — delete them (see Uninstalling).
-This server writes nowhere else: SQLite and the Apple frameworks it calls may use the
-system's temporary files for their own transient work.
+`~/Library/Caches/whatsapp-mcp/tmp/` is where a voice note or a video's sound is converted to
+WAV for the speech recogniser when macOS cannot open the original. Each call makes a folder
+of its own, readable only by your user, and deletes it before it answers. If the server is
+killed mid-conversion the folder can be left behind; it is safe to delete, and the next
+conversion removes any that is more than an hour old. `--scratch-directory` moves it.
+
+**Nothing else is kept.** No database is copied, and a transcript is never stored: it is in
+the answer and nowhere else, so asking for the same audio again recognises it again. Versions
+before 1.4.0 kept scrubbed copies of WhatsApp's databases here, and versions before 1.5.0
+kept transcripts (`transcripts/<hash>-<language>.json`); nothing reads them any more and an
+update does not remove them — delete them (see Uninstalling). This server writes nowhere
+else: SQLite and the Apple frameworks it calls may use the system's temporary files for
+their own transient work.
 
 ## Logs
 
@@ -168,9 +172,9 @@ identity would keep the grant across rebuilds, but a certificate's subject carri
 of whoever holds it, so a binary meant to be published must not be signed with a personal one.
 
 **Uninstalling:** remove the extension in Claude, remove the `whatsapp-mcp` entry from Full
-Disk Access, and delete the cache (`rm -rf ~/Library/Caches/whatsapp-mcp` — transcripts, and
-on a Mac that ran a version before 1.4.0, plaintext copies of your WhatsApp databases; it is
-not removed with the extension).
+Disk Access, and delete `~/Library/Caches/whatsapp-mcp` (`rm -rf` it) — on a Mac that ran an
+earlier version it may still hold plaintext copies of your WhatsApp databases or transcripts
+of your voice notes, and it is not removed with the extension.
 
 ## The rules worth knowing before you use it
 
@@ -253,10 +257,10 @@ FOUND` means the file is not there — open WhatsApp for Mac at least once. For 
 Every tool can be turned on or off individually in Claude Desktop's extension settings,
 because the manifest declares them all. No tool changes WhatsApp, so there is no switch that
 can turn on anything destructive. Two switches are worth knowing: `db_query` reaches any
-allow-listed database, and `audio_transcribe` is the one that declares it writes its cache.
+allow-listed database, and `audio_transcribe` reads the audio you point it at.
 
 Reading needs no configuration. Transcription needs the speech model for your language, and
-`ffmpeg` for a video's sound (see above); `--ffmpeg` and `--cache-directory` exist for manual runs.
+`ffmpeg` for a video's sound (see above); `--ffmpeg` and `--scratch-directory` exist for manual runs.
 
 ## Manual registration instead
 
@@ -319,8 +323,8 @@ hard rule at the top is what makes that non-negotiable.
 Manual verification against a real WhatsApp database is the owner's job, and is done on a
 copy: put a copy of `ChatStorage.sqlite` together with its `-wal` and `-shm` files (and, for
 attachments, the files it names under `Message/`) in a temporary directory and start the
-server with `--database <that copy>` and `--cache-directory <another temporary directory>`,
-so neither the live container nor the real cache is touched. Delete both afterwards.
+server with `--database <that copy>` and `--scratch-directory <another temporary directory>`,
+so neither the live container nor the real scratch folder is touched. Delete both afterwards.
 
 ## Licence
 

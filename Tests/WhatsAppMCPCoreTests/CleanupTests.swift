@@ -32,7 +32,7 @@ struct CleanupTests {
             try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: url.path)
         }
 
-        CacheSweep.sweepStaleTemporaries(in: cache)
+        ScratchSweep.sweepStaleDirectories(in: cache)
 
         let remaining = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
         #expect(remaining.contains("notes.txt"), "only this server's own scratch directories are touched")
@@ -56,7 +56,7 @@ struct CleanupTests {
         try FileManager.default.createDirectory(at: linkedCache, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(
             at: linkedCache.appendingPathComponent("tmp"), withDestinationURL: elsewhere)
-        CacheSweep.sweepStaleTemporaries(in: linkedCache)
+        ScratchSweep.sweepStaleDirectories(in: linkedCache)
         #expect(FileManager.default.fileExists(atPath: precious.path), "the sweep followed a symlink")
 
         // A conversion that has been running for hours: old directory, fresh output file.
@@ -65,7 +65,7 @@ struct CleanupTests {
         try FileManager.default.createDirectory(at: running, withIntermediateDirectories: true)
         try Data("wav".utf8).write(to: running.appendingPathComponent("audio.wav"))
         try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: running.path)
-        CacheSweep.sweepStaleTemporaries(in: cache)
+        ScratchSweep.sweepStaleDirectories(in: cache)
         #expect(FileManager.default.fileExists(atPath: running.path), "a live conversion was swept")
     }
 
@@ -158,7 +158,7 @@ struct ServerLifecycleTests {
         server.executableURL = binary
         server.arguments = [
             "--database", container.appendingPathComponent("ChatStorage.sqlite").path,
-            "--cache-directory", cache.path, "--ffmpeg", ffmpeg.path,
+            "--scratch-directory", cache.path, "--ffmpeg", ffmpeg.path,
         ]
         let input = Pipe()
         server.standardInput = input

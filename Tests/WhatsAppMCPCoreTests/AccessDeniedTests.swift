@@ -191,7 +191,7 @@ struct AccessDeniedTests {
         let tools = WhatsAppTools(
             store: store, mediaFiles: MediaFiles(root: root),
             transcription: TranscriptionService(
-                mediaFiles: MediaFiles(root: root), cacheDirectory: directory.appendingPathComponent("cache"),
+                mediaFiles: MediaFiles(root: root), scratchDirectory: directory.appendingPathComponent("cache"),
                 converter: nil, engine: UnusedEngine()),
             calendar: Fixtures.calendar)
 

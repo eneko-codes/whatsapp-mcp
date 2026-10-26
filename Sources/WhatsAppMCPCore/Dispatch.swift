@@ -8,7 +8,7 @@ import MCP
 ///
 /// This server never changes WhatsApp. There is no sender, no shortcut and no Apple
 /// event anywhere beneath this type, so no tool routed here can reach outside this Mac;
-/// the only thing a tool writes is the server's own cache.
+/// the only file a tool makes is a scratch directory, deleted when the call ends.
 public struct WhatsAppTools: Sendable {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?
