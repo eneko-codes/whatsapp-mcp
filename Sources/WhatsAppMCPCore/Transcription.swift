@@ -270,6 +270,8 @@ public struct TranscriptionService: Sendable {
             return stored
         }
 
+        // Anything a killed earlier process left here is swept first: SIGKILL runs no cleanup.
+        CacheSweep.sweepStaleTemporaries(in: cacheDirectory)
         let scratch = cacheDirectory.appendingPathComponent("tmp/\(UUID().uuidString)")
         try makePrivateDirectory(scratch)
         ProcessCleanup.shared.register(path: scratch.path)

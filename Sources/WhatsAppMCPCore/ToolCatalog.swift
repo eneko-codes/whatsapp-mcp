@@ -9,7 +9,7 @@ import MCP
 /// attachments — rather than one per query somebody happened to need. Every tool reads, and
 /// no tool carries a verb prefix because there is no verb to warn about: this server never
 /// changes WhatsApp and never sends anything anywhere. Some tools also keep a result in the
-/// server's own cache (see CLAUDE.md); a tool that changed WhatsApp or sent anything would
+/// server's own cache (see CLAUDE.md), never database content; a tool that changed WhatsApp or sent anything would
 /// be the first, and must not be added.
 public enum ToolCatalog {
 
@@ -428,8 +428,8 @@ public enum ToolCatalog {
     // MARK: Beyond the chat store
 
     private static let copyNote = """
-        Read from a private copy of the database kept in ~/Library/Caches/whatsapp-mcp; the \
-        answer says when it was taken.
+        Read live from the database, through WhatsApp's write-ahead log; the answer says \
+        which database and when.
         """
 
     static let calls = Tool(
@@ -556,9 +556,9 @@ public enum ToolCatalog {
     ])
 
     private static let snapshotHelp = """
-        Reads a private copy of the database made in ~/Library/Caches/whatsapp-mcp and \
-        refreshed whenever WhatsApp changes the file; the answer says when the copy was \
-        taken. Rows WhatsApp has not yet written out of its journal are not in the copy.
+        Reads the database live, through WhatsApp's write-ahead log, so the newest rows \
+        are included; the answer says when it was read. Only the tables the database \
+        itself declares can be read — not SQLite's internal ones, such as raw pages.
         """
 
     static let dbTables = Tool(
@@ -616,9 +616,9 @@ public enum ToolCatalog {
                 "db": databaseProperty,
                 "sql": string("A single SELECT or WITH … SELECT statement."),
                 "limit": integer(
-                    "Maximum rows to return.", minimum: SnapshotDatabaseExplorer.rowLimitRange.lowerBound,
-                    maximum: SnapshotDatabaseExplorer.rowLimitRange.upperBound,
-                    default: SnapshotDatabaseExplorer.defaultRowLimit),
+                    "Maximum rows to return.", minimum: LiveDatabaseExplorer.rowLimitRange.lowerBound,
+                    maximum: LiveDatabaseExplorer.rowLimitRange.upperBound,
+                    default: LiveDatabaseExplorer.defaultRowLimit),
             ], required: ["db", "sql"]),
         annotations: .init(
             readOnlyHint: true, destructiveHint: false, idempotentHint: true,

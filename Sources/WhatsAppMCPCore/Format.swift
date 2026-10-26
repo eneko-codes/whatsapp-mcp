@@ -20,8 +20,7 @@ public struct Format: Sendable {
     // MARK: Status
 
     public func status(
-        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String,
-        snapshots: [SnapshotInfo] = []
+        _ info: DatabaseInfo, availability: StoreAvailability, binaryPath: String
     ) -> String {
         var lines = ["whatsapp-mcp \(WhatsAppMCPServer.version)"]
         lines.append("binary: \(binaryPath)")
@@ -78,21 +77,15 @@ public struct Format: Sendable {
         }
 
         lines.append("")
-        lines.append("COPIES · private snapshots read by db_tables, db_schema and db_query")
-        if snapshots.isEmpty {
-            lines.append("  none yet — a database is copied the first time a db_* tool reads it")
-        }
-        for snapshot in snapshots {
-            var line =
-                "  \(snapshot.database.rawValue): copied \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
-            if snapshot.stale { line += " — STALE, the source has changed since" }
-            lines.append(line)
-        }
+        lines.append("OTHER DATABASES · db_tables, db_schema, db_query and the call, label, address")
+        lines.append("  book, LID and channel tools read WhatsApp's other databases live, the same way;")
+        lines.append("  nothing is copied or kept. Each answer names the database and when it was read.")
 
         lines.append("")
-        lines.append("This server never changes WhatsApp. It has no tool that sends, edits or")
-        lines.append("deletes anything, and no way to reach any network. It writes only its own")
-        lines.append("cache, ~/Library/Caches/whatsapp-mcp (copies listed above, transcripts).")
+        lines.append("This server never changes WhatsApp's data. It has no tool that sends, edits or")
+        lines.append("deletes anything, and no way to reach any network. Reading a database does update")
+        lines.append("its -shm index file, which SQLite uses to coordinate readers; it holds no messages.")
+        lines.append("It writes only transcripts and a scratch folder, in ~/Library/Caches/whatsapp-mcp.")
 
         // Things a caller will otherwise assume are merely missing from this server,
         // rather than absent from WhatsApp's own storage. Every one was established by
@@ -111,28 +104,28 @@ public struct Format: Sendable {
 
     // MARK: Raw databases
 
-    func snapshotLine(_ snapshot: SnapshotInfo) -> String {
-        "\(snapshot.database.rawValue) · copy taken \(DateParsing.roundTrip(snapshot.copiedAt, calendar: calendar))"
+    func sourceLine(_ source: SourceInfo) -> String {
+        "\(source.database.rawValue) · read live \(DateParsing.roundTrip(source.readAt, calendar: calendar))"
     }
 
-    public func databaseTables(_ entries: [TableEntry], snapshot: SnapshotInfo) -> String {
-        var lines = [snapshotLine(snapshot), "\(entries.count) tables and views", ""]
+    public func databaseTables(_ entries: [TableEntry], source: SourceInfo) -> String {
+        var lines = [sourceLine(source), "\(entries.count) tables and views", ""]
         lines += entries.map { "\($0.name)  [\($0.kind)]" }
         return lines.joined(separator: "\n")
     }
 
-    public func databaseSchema(_ statements: [String], snapshot: SnapshotInfo) -> String {
+    public func databaseSchema(_ statements: [String], source: SourceInfo) -> String {
         guard !statements.isEmpty else {
-            return snapshotLine(snapshot) + "\n\nNo such table or view in this database."
+            return sourceLine(source) + "\n\nNo such table or view in this database."
         }
-        return ([snapshotLine(snapshot), ""] + statements.map { $0 + ";" }).joined(separator: "\n")
+        return ([sourceLine(source), ""] + statements.map { $0 + ";" }).joined(separator: "\n")
     }
 
     /// Tab-separated, because a SQL value can contain a comma and cannot contain a tab
     /// without it being visible. A tab or newline inside a value is replaced by a space
     /// so one row is always one line.
     public func queryResult(_ result: QueryResult, limit: Int) -> String {
-        var lines = [snapshotLine(result.snapshot)]
+        var lines = [sourceLine(result.source)]
         lines.append(
             "\(result.rows.count) row\(result.rows.count == 1 ? "" : "s")"
                 + (result.truncated ? " · more rows exist, stopped at the row limit (\(limit)) or the output size cap" : ""))
@@ -225,8 +218,8 @@ public struct Format: Sendable {
         date.map { DateParsing.roundTrip($0, calendar: calendar) } ?? "unknown time"
     }
 
-    private func header(_ snapshot: SnapshotInfo, _ count: String) -> [String] {
-        [snapshotLine(snapshot), count, ""]
+    private func header(_ source: SourceInfo, _ count: String) -> [String] {
+        [sourceLine(source), count, ""]
     }
 
     /// A list that stopped at its limit has to say so, or it reads as everything there is.
@@ -245,11 +238,11 @@ public struct Format: Sendable {
         return ["", "Stopped at the limit of \(limit); there may be more: \(how)."]
     }
 
-    public func calls(_ calls: [CallEvent], snapshot: SnapshotInfo, limit: Int? = nil, offset: Int = 0)
+    public func calls(_ calls: [CallEvent], source: SourceInfo, limit: Int? = nil, offset: Int = 0)
         -> String
     {
-        guard !calls.isEmpty else { return snapshotLine(snapshot) + "\n\nNo calls found." }
-        var lines = header(snapshot, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
+        guard !calls.isEmpty else { return sourceLine(source) + "\n\nNo calls found." }
+        var lines = header(source, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
         for call in calls {
             var parts = ["\(call.id)  \(when(call.date))"]
             if let incoming = call.incoming { parts.append(incoming ? "incoming" : "outgoing") }
@@ -273,11 +266,11 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func locationSharing(_ sharing: LocationSharing, snapshot: SnapshotInfo, limit: Int? = nil)
+    public func locationSharing(_ sharing: LocationSharing, source: SourceInfo, limit: Int? = nil)
         -> String
     {
         var lines = header(
-            snapshot,
+            source,
             "\(sharing.outgoing.count) sharing session(s) you started, "
                 + "\(sharing.recipients.count) recipient row(s)")
         for item in sharing.outgoing {
@@ -297,12 +290,12 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func labels(_ labels: [Label], snapshot: SnapshotInfo) -> String {
+    public func labels(_ labels: [Label], source: SourceInfo) -> String {
         guard !labels.isEmpty else {
-            return snapshotLine(snapshot)
+            return sourceLine(source)
                 + "\n\nNo labels. Labels exist only on accounts that use them."
         }
-        var lines = header(snapshot, "\(labels.count) label\(labels.count == 1 ? "" : "s")")
+        var lines = header(source, "\(labels.count) label\(labels.count == 1 ? "" : "s")")
         for label in labels {
             var line = "\(label.id)  \(label.name ?? "(unnamed)")"
             if let colour = label.colorID { line += " · colour id \(colour)" }
@@ -314,11 +307,11 @@ public struct Format: Sendable {
     }
 
     public func labeledEntities(
-        _ entities: [LabeledEntity], label: Label, snapshot: SnapshotInfo, limit: Int? = nil
+        _ entities: [LabeledEntity], label: Label, source: SourceInfo, limit: Int? = nil
     ) -> String
     {
         var lines = header(
-            snapshot, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
+            source, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
         for entity in entities {
             lines.append(
                 "\(entity.contactJID ?? entity.entityKey ?? "unknown")"
@@ -330,10 +323,10 @@ public struct Format: Sendable {
     }
 
     public func addressBook(
-        _ entries: [AddressBookEntry], snapshot: SnapshotInfo, limit: Int? = nil, offset: Int = 0
+        _ entries: [AddressBookEntry], source: SourceInfo, limit: Int? = nil, offset: Int = 0
     ) -> String {
-        guard !entries.isEmpty else { return snapshotLine(snapshot) + "\n\nNo entries found." }
-        var lines = header(snapshot, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
+        guard !entries.isEmpty else { return sourceLine(source) + "\n\nNo entries found." }
+        var lines = header(source, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
         for entry in entries {
             var parts = ["\(entry.id)  \(entry.fullName ?? entry.businessName ?? "(no name)")"]
             if entry.fullName != nil, let business = entry.businessName { parts.append("business \(business)") }
@@ -349,9 +342,9 @@ public struct Format: Sendable {
     }
 
     public func lidMatches(
-        _ matches: [LIDMatch], value: String, snapshots: [SnapshotInfo], notes: [String] = []
+        _ matches: [LIDMatch], value: String, sources: [SourceInfo], notes: [String] = []
     ) -> String {
-        var lines = snapshots.map(snapshotLine) + notes.map { "NOTE: \($0)" }
+        var lines = sources.map(sourceLine) + notes.map { "NOTE: \($0)" }
         lines.append("\(matches.count) record(s) for '\(value)'")
         lines.append("")
         if matches.isEmpty {
@@ -371,9 +364,9 @@ public struct Format: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func channels(_ channels: [Channel], snapshot: SnapshotInfo, limit: Int? = nil) -> String {
-        guard !channels.isEmpty else { return snapshotLine(snapshot) + "\n\nNo channels found." }
-        var lines = header(snapshot, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
+    public func channels(_ channels: [Channel], source: SourceInfo, limit: Int? = nil) -> String {
+        guard !channels.isEmpty else { return sourceLine(source) + "\n\nNo channels found." }
+        var lines = header(source, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
         for channel in channels {
             var line = "\(channel.name ?? "(unnamed)") · \(channel.jid)"
             if let by = channel.addedByName ?? channel.addedByLID { line += " · added by \(by)" }

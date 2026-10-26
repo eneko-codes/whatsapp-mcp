@@ -1,5 +1,4 @@
 import Foundation
-import SQLite3
 import Testing
 
 @testable import WhatsAppMCPCore
@@ -18,85 +17,25 @@ struct CleanupTests {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
     }
 
-    @Test("The raw backup is owner-only and registered for cleanup from its first byte, while it holds the keys",
-          .timeLimit(.minutes(2)))
-    func temporariesAreOwnerOnlyAndRegisteredWhileTheCopyRuns() async throws {
-        let directory = try temporary()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let container = directory.appendingPathComponent("container")
-        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
-
-        // ~96 MB, so the copy, the scrub and the rebuild take long enough to be observed.
-        var handle: OpaquePointer?
-        let source = container.appendingPathComponent("ExtChatDB").appendingPathComponent("ExtChatDatabase.sqlite")
-        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
-        #expect(sqlite3_open(source.path, &handle) == SQLITE_OK)
-        for statement in [
-            "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key BLOB)",
-            "CREATE TABLE filler (b BLOB)",
-            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 96) INSERT INTO filler SELECT zeroblob(1000000) FROM n",
-        ] {
-            #expect(sqlite3_exec(handle, statement, nil, nil, nil) == SQLITE_OK)
-        }
-        sqlite3_close(handle)
-
-        let cache = directory.appendingPathComponent("cache")
-        let observed = ObservedTemporaries()
-        let watcher = Task.detached {
-            while !Task.isCancelled {
-                for name in (try? FileManager.default.contentsOfDirectory(atPath: cache.path)) ?? []
-                where name.contains(".tmp-") {
-                    let url = cache.appendingPathComponent(name)
-                    if let found = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int {
-                        // Registered at the moment it was seen, which is the property: a signal
-                        // arriving now would delete it.
-                        // A journal or WAL file is covered by its database's registration: the
-                        // cleanup deletes the registered path and each of these suffixes.
-                        var base = url.path
-                        for suffix in ["-journal", "-wal", "-shm"] where base.hasSuffix(suffix) {
-                            base = String(base.dropLast(suffix.count))
-                        }
-                        observed.record(mode: found, registered: ProcessCleanup.shared.registeredPaths.contains(base))
-                    }
-                }
-                try? await Task.sleep(nanoseconds: 1_000_000)
-            }
-        }
-        // The default umask (022) is what would have made the old code's files 0644.
-        _ = try SnapshotCache(containerDirectory: container, cacheDirectory: cache).snapshot(of: .extendedChat)
-        watcher.cancel()
-
-        #expect(!observed.modes.isEmpty, "the copy was too quick to observe")
-        #expect(observed.modes.allSatisfy { $0 == 0o600 }, "temporary modes seen: \(Set(observed.modes).map { String($0, radix: 8) })")
-        #expect(observed.unregistered == 0, "a temporary existed while not registered for cleanup")
-        #expect(ProcessCleanup.shared.registeredPaths.filter { $0.contains(".tmp-") }.isEmpty, "left registered after the copy")
-    }
-
-    @Test("Temporaries a dead process left are swept, a live process's are not")
+    @Test("Scratch directories a dead process left are swept, a live process's are not")
     func staleTemporariesAreSwept() throws {
         let directory = try temporary()
         defer { try? FileManager.default.removeItem(at: directory) }
         let cache = directory
         try FileManager.default.createDirectory(at: cache.appendingPathComponent("tmp/old-run"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: cache.appendingPathComponent("tmp/live-run"), withIntermediateDirectories: true)
-        let oldBackup = cache.appendingPathComponent("ChatStorage.sqlite.tmp-OLD")
-        let oldRebuilt = cache.appendingPathComponent("ChatStorage.sqlite.tmp-OLD.rebuilt")
-        let liveBackup = cache.appendingPathComponent("ChatStorage.sqlite.tmp-LIVE")
         let unrelated = cache.appendingPathComponent("notes.txt")
-        for url in [oldBackup, oldRebuilt, liveBackup, unrelated] { try Data("x".utf8).write(to: url) }
+        try Data("x".utf8).write(to: unrelated)
 
         let longAgo = Date().addingTimeInterval(-7200)
-        for url in [oldBackup, oldRebuilt, unrelated, cache.appendingPathComponent("tmp/old-run")] {
+        for url in [unrelated, cache.appendingPathComponent("tmp/old-run")] {
             try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: url.path)
         }
 
-        SnapshotCache.sweepStaleTemporaries(in: cache)
+        CacheSweep.sweepStaleTemporaries(in: cache)
 
         let remaining = Set(try FileManager.default.contentsOfDirectory(atPath: cache.path))
-        #expect(!remaining.contains("ChatStorage.sqlite.tmp-OLD"))
-        #expect(!remaining.contains("ChatStorage.sqlite.tmp-OLD.rebuilt"))
-        #expect(remaining.contains("ChatStorage.sqlite.tmp-LIVE"), "a recent temporary may be another instance's")
-        #expect(remaining.contains("notes.txt"), "only this server's own temporaries are touched")
+        #expect(remaining.contains("notes.txt"), "only this server's own scratch directories are touched")
         #expect(!FileManager.default.fileExists(atPath: cache.appendingPathComponent("tmp/old-run").path))
         #expect(FileManager.default.fileExists(atPath: cache.appendingPathComponent("tmp/live-run").path))
     }
@@ -117,7 +56,7 @@ struct CleanupTests {
         try FileManager.default.createDirectory(at: linkedCache, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(
             at: linkedCache.appendingPathComponent("tmp"), withDestinationURL: elsewhere)
-        SnapshotCache.sweepStaleTemporaries(in: linkedCache)
+        CacheSweep.sweepStaleTemporaries(in: linkedCache)
         #expect(FileManager.default.fileExists(atPath: precious.path), "the sweep followed a symlink")
 
         // A conversion that has been running for hours: old directory, fresh output file.
@@ -126,7 +65,7 @@ struct CleanupTests {
         try FileManager.default.createDirectory(at: running, withIntermediateDirectories: true)
         try Data("wav".utf8).write(to: running.appendingPathComponent("audio.wav"))
         try FileManager.default.setAttributes([.modificationDate: longAgo], ofItemAtPath: running.path)
-        SnapshotCache.sweepStaleTemporaries(in: cache)
+        CacheSweep.sweepStaleTemporaries(in: cache)
         #expect(FileManager.default.fileExists(atPath: running.path), "a live conversion was swept")
     }
 
@@ -160,21 +99,6 @@ struct CleanupTests {
     }
 
 }
-
-private final class ObservedTemporaries: @unchecked Sendable {
-    private let lock = NSLock()
-    private var seen: [Int] = []
-    private var missed = 0
-    func record(mode: Int, registered: Bool) {
-        lock.withLock {
-            seen.append(mode)
-            if !registered { missed += 1 }
-        }
-    }
-    var modes: [Int] { lock.withLock { seen } }
-    var unregistered: Int { lock.withLock { missed } }
-}
-
 
 /// The built server, started for real, stopped for real.
 ///

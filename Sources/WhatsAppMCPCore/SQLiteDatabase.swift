@@ -222,7 +222,8 @@ final class ReadOnlyDatabase {
             case .notReadOnly: "the statement would change the database"
             case .timedOut: "the statement ran past its time limit and was stopped"
             case .blocked:
-                "the statement reads key material or raw protocol queues, which no tool here returns"
+                "the statement reads key material, raw protocol queues or a table the database "
+                    + "does not declare, which no tool here returns"
             case .failed(let detail): detail
             }
         }
@@ -265,11 +266,22 @@ final class ReadOnlyDatabase {
         // closure returns, so the unparsed remainder is read inside it. Reading it later
         // sees freed memory, which looks like "nothing left" and lets a second statement
         // through.
-        // Columns and tables that hold key material or undecrypted protocol payloads are
-        // refused at prepare time, whatever the statement does with them — hex(), CAST and
-        // a subquery all go through the same read. See `blockedReads`.
-        sqlite3_set_authorizer(handle, authorizeRead, nil)
-        defer { sqlite3_set_authorizer(handle, nil, nil) }
+        // Tables the database does not declare are refused at prepare time, and so are
+        // columns and tables that hold key material or undecrypted protocol payloads,
+        // whatever the statement does with them — hex(), CAST and a subquery all go through
+        // the same read. See `ReadPolicy` and `blockedReads`.
+        // Read before the authorizer is installed, and from the connection itself, so the
+        // set is what this database declares and not what the caller's statement names.
+        var declared: Set<String> = ["sqlite_master", "sqlite_schema"]
+        try query("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')") { row in
+            if let name = row.text(0) { declared.insert(name.lowercased()) }
+        }
+        let policy = ReadPolicy(declaredTables: declared)
+        sqlite3_set_authorizer(handle, authorizeRead, Unmanaged.passUnretained(policy).toOpaque())
+        defer {
+            sqlite3_set_authorizer(handle, nil, nil)
+            withExtendedLifetime(policy) {}
+        }
 
         var prepared: OpaquePointer?
         var hasSecondStatement = false
@@ -508,16 +520,43 @@ let blockedReads: [(table: String, column: String?)] = [
     ("dbstat", nil),
 ]
 
+/// The tables a statement may read a column of: exactly those the database itself declares
+/// in `sqlite_master`, plus `sqlite_master`. An allow-list, because a block list is one
+/// forgotten name away from a leak. SQLite can be built with `SQLITE_ENABLE_DBPAGE_VTAB`,
+/// which adds `sqlite_dbpage`: the file's raw pages, every column of every table including
+/// the ones `blockedReads` refuses by name. The library this server links does not have it
+/// (checked with `sqlite3_compileoption_used`), but the system's own `sqlite3` tool does,
+/// so it is one library change away. `dbstat`, `bytecode`, `json_each` and the `pragma_*`
+/// functions are virtual tables the linked library does have. None is declared by the
+/// database, so no column of any of them is readable here.
+///
+/// A read that names no column — `SELECT count(*)` — is not refused for an undeclared name:
+/// SQLite reports it for a recursive CTE too, it exposes no content, and the table-level
+/// rules in `blockedReads` still apply to it.
+private final class ReadPolicy {
+    let declaredTables: Set<String>
+
+    init(declaredTables: Set<String>) {
+        self.declaredTables = declaredTables
+    }
+}
+
 /// `SQLITE_READ` is action 20; arguments 1 and 2 are the table and column. A bare C
-/// function with no captured state, as SQLite requires.
+/// function with no captured state, as SQLite requires; the policy arrives as its context.
 private let authorizeRead:
     @convention(c) (
         UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
         UnsafePointer<CChar>?, UnsafePointer<CChar>?
-    ) -> Int32 = { _, action, tableName, columnName, _, _ in
-        guard action == SQLITE_READ, let tableName else { return SQLITE_OK }
+    ) -> Int32 = { context, action, tableName, columnName, _, _ in
+        guard action == SQLITE_READ else { return SQLITE_OK }
+        // A read with no policy, or of a table with no name, is not one this server can vouch for.
+        guard let tableName, let context else { return SQLITE_DENY }
         let table = String(cString: tableName)
         let column = columnName.map { String(cString: $0) }
+        let policy = Unmanaged<ReadPolicy>.fromOpaque(context).takeUnretainedValue()
+        if column?.isEmpty == false, !policy.declaredTables.contains(table.lowercased()) {
+            return SQLITE_DENY
+        }
         let blocked = blockedReads.contains { rule in
             (rule.table == "*" || rule.table.caseInsensitiveCompare(table) == .orderedSame)
                 && (rule.column == nil

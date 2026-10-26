@@ -4,7 +4,7 @@ import MCP
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.3.0"
+    public static let version = "1.4.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and writes only its own cache, that
@@ -22,11 +22,10 @@ public enum WhatsAppMCPServer {
         WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
         steps; it is not a missing file.
 
-        The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: private \
-        copies of WhatsApp's databases (taken read-only, refreshed when WhatsApp changes \
-        the file), saved transcripts, and a scratch directory deleted after each conversion. \
-        That cache holds real message data in plaintext, owner-readable only, and stays \
-        until deleted; copies are emptied of key material as they are made.
+        The one thing it writes is its own cache, ~/Library/Caches/whatsapp-mcp: saved \
+        transcripts and a scratch directory deleted after each conversion. No database \
+        content is copied or kept; every database is read live. db_query can read only \
+        the tables a database itself declares, and never key material.
 
         THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's private \
         storage, undocumented and free to change in any update. If a tool reports a missing \
@@ -35,7 +34,7 @@ public enum WhatsAppMCPServer {
 
         The newest messages are included: the databases are read through WhatsApp's \
         write-ahead log. A message WhatsApp has not committed yet is not visible, and \
-        every copy-based answer says when its copy was taken.
+        every answer from a database other than the chat store says when it was read.
 
         Workflow: chats_list to see what exists, chat_get for one conversation, \
         whatsapp_search across all of them (with starred_only=true and no phrase it lists \
@@ -83,14 +82,12 @@ public enum WhatsAppMCPServer {
         transcription: TranscriptionService? = nil,
         configuration: Configuration = Configuration()
     ) async throws {
-        let cache = SnapshotCache(
-            containerDirectory: configuration.containerDirectory,
-            cacheDirectory: URL(fileURLWithPath: configuration.cacheDirectory))
+        let databases = ContainerDatabases(containerDirectory: configuration.containerDirectory)
         let mediaFiles = MediaFiles(containerDirectory: configuration.containerDirectory)
         let tools = WhatsAppTools(
             store: store ?? SystemWhatsAppStore(path: configuration.databasePath),
-            explorer: explorer ?? SnapshotDatabaseExplorer(cache: cache),
-            reader: reader ?? SnapshotDomainReader(cache: cache),
+            explorer: explorer ?? LiveDatabaseExplorer(databases: databases),
+            reader: reader ?? LiveDomainReader(databases: databases),
             mediaFiles: mediaFiles,
             transcription: transcription
                 ?? TranscriptionService(

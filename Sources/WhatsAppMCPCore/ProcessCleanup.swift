@@ -2,11 +2,10 @@ import Foundation
 
 /// What a process has put on disk or started that must not outlive it.
 ///
-/// A copy being made holds WhatsApp's keys until it has been scrubbed, and a conversion
-/// leaves ffmpeg and a scratch directory behind if the server stops mid-call. Normal returns
-/// clean up through `defer`, but a client that closes stdin, a `SIGTERM` or a closed pipe
-/// skips every `defer`. This registry is what those paths run instead. `SIGKILL` cannot be
-/// caught, so `SnapshotCache` also sweeps what an earlier process left behind.
+/// A conversion leaves ffmpeg and a scratch directory behind if the server stops mid-call.
+/// Normal returns clean up through `defer`, but a client that closes stdin, a `SIGTERM` or a
+/// closed pipe skips every `defer`. This registry is what those paths run instead. `SIGKILL`
+/// cannot be caught, so `CacheSweep` also removes what an earlier process left behind.
 ///
 /// One instance, `shared`, serves the whole process. It is a class and not a set of static
 /// functions so that a test can use its own and call `run()` without deleting the files and

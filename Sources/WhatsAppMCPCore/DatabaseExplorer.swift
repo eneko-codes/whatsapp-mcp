@@ -1,11 +1,11 @@
 import Foundation
 
-/// A `db_query` answer: the rows plus which copy they came from, so a stale one is visible.
+/// A `db_query` answer: the rows plus which source they were read from and when.
 public struct QueryResult: Sendable, Equatable {
     public var columns: [String]
     public var rows: [[String]]
     public var truncated: Bool
-    public var snapshot: SnapshotInfo
+    public var source: SourceInfo
 }
 
 public struct TableEntry: Sendable, Equatable {
@@ -17,29 +17,29 @@ public struct TableEntry: Sendable, Equatable {
 /// because these three tools read any allowed database, not just the chat store, and
 /// because the tests drive them with a fixture directory instead of a double.
 public protocol DatabaseExplorer: Sendable {
-    func tables(in database: AllowedDatabase) throws -> (entries: [TableEntry], snapshot: SnapshotInfo)
+    func tables(in database: AllowedDatabase) throws -> (entries: [TableEntry], source: SourceInfo)
     func schema(of database: AllowedDatabase, table: String?) throws
-        -> (statements: [String], snapshot: SnapshotInfo)
+        -> (statements: [String], source: SourceInfo)
     func select(_ sql: String, in database: AllowedDatabase, limit: Int) throws -> QueryResult
-    func existingSnapshots() -> [SnapshotInfo]
 }
 
-/// Reads only the cached copies. The source files are touched once per change, by
-/// `SnapshotCache`; a query never opens a file in WhatsApp's container.
-public struct SnapshotDatabaseExplorer: DatabaseExplorer {
-    private let cache: SnapshotCache
+/// Reads the allow-listed databases live, through `ContainerDatabases`. `db_query` is the
+/// one place a string from outside reaches SQLite, so it is the one place `ReadOnlyDatabase`
+/// restricts what a statement may read to the tables the database itself declares.
+public struct LiveDatabaseExplorer: DatabaseExplorer {
+    private let databases: ContainerDatabases
 
-    public init(cache: SnapshotCache) {
-        self.cache = cache
+    public init(databases: ContainerDatabases) {
+        self.databases = databases
     }
 
     public static let rowLimitRange = 1...500
     public static let defaultRowLimit = 100
 
     public func tables(in database: AllowedDatabase) throws -> (
-        entries: [TableEntry], snapshot: SnapshotInfo
+        entries: [TableEntry], source: SourceInfo
     ) {
-        let (connection, info) = try cache.openReadable(database)
+        let (connection, info) = try databases.open(database)
         var entries: [TableEntry] = []
         try connection.query(
             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name"
@@ -50,9 +50,9 @@ public struct SnapshotDatabaseExplorer: DatabaseExplorer {
     }
 
     public func schema(of database: AllowedDatabase, table: String?) throws -> (
-        statements: [String], snapshot: SnapshotInfo
+        statements: [String], source: SourceInfo
     ) {
-        let (connection, info) = try cache.openReadable(database)
+        let (connection, info) = try databases.open(database)
         var statements: [String] = []
         // The table name is bound, never interpolated: it comes from the caller.
         try connection.query(
@@ -71,12 +71,11 @@ public struct SnapshotDatabaseExplorer: DatabaseExplorer {
     public func select(_ sql: String, in database: AllowedDatabase, limit: Int) throws
         -> QueryResult
     {
-        let (connection, info) = try cache.openReadable(database)
+        let (connection, info) = try databases.open(database)
         let selected = try connection.selectRows(sql, maxRows: limit)
         return QueryResult(
             columns: selected.columns, rows: selected.rows, truncated: selected.truncated,
-            snapshot: info)
+            source: info)
     }
 
-    public func existingSnapshots() -> [SnapshotInfo] { cache.existingSnapshots() }
 }

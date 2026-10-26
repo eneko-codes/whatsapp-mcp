@@ -340,6 +340,82 @@ struct BlockedReadTests {
         }
     }
 
+    /// Virtual tables the database does not declare expose SQLite's internals, not its rows:
+    /// `dbstat` sizes pages, `json_each` and `pragma_*` run functions, and a library built with
+    /// `SQLITE_ENABLE_DBPAGE_VTAB` would add `sqlite_dbpage`, the file's raw pages — key
+    /// columns included, around every rule that names a column. The linked library has no
+    /// `sqlite_dbpage` today, so that statement must fail either way: refused, or no such table.
+    @Test("No column of an undeclared virtual table can be read")
+    func undeclaredVirtualTablesAreRefused() async throws {
+        let fake = try FakeContainer()
+        defer { fake.remove() }
+        let marker = "KEYMARK-0123456789-ABCDEF"
+        try fake.build(
+            .extendedChat,
+            [
+                "CREATE TABLE feature_key_store (_id INTEGER PRIMARY KEY, key BLOB)",
+                "INSERT INTO feature_key_store VALUES (1, CAST('\(marker)' AS BLOB))",
+            ])
+        for sql in [
+            "SELECT count(*) FROM sqlite_dbpage WHERE instr(data, CAST('\(marker)' AS BLOB)) > 0",
+            "SELECT data FROM sqlite_dbpage",
+            "SELECT name FROM dbstat",
+            "SELECT value FROM json_each('[1]')",
+            "SELECT name FROM pragma_table_info('feature_key_store')",
+            "SELECT opcode FROM bytecode('SELECT 1')",
+        ] {
+            let (text, isError) = await call(
+                fake.tools(), ToolCatalog.dbQueryName,
+                ["db": .string("ExtChatDB"), "sql": .string(sql)])
+            #expect(isError, "\(sql) was allowed")
+            #expect(!text.contains(marker))
+            // The statements the linked library can parse are refused by the policy itself,
+            // not by a failure that happens to look like a refusal.
+            if !sql.contains("sqlite_dbpage") {
+                #expect(text.contains("does not declare"), Comment(rawValue: "\(sql): \(text)"))
+            }
+        }
+    }
+
+    @Test("A recursive CTE, which SQLite reports as a read of a table that is not declared, still works")
+    func recursiveCTEStillWorks() async throws {
+        let fake = try container()
+        defer { fake.remove() }
+        let (text, isError) = await call(
+            fake.tools(), ToolCatalog.dbQueryName,
+            [
+                "db": .string("ExtChatDB"),
+                "sql": .string(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) "
+                        + "SELECT count(*), max(i) FROM n"),
+            ])
+        #expect(!isError)
+        #expect(text.contains("5\t5"))
+    }
+
+    @Test("Only tables the database declares are readable, and sqlite_master is one")
+    func onlyDeclaredTablesAreReadable() async throws {
+        let fake = try container()
+        defer { fake.remove() }
+        let (declared, declaredError) = await call(
+            fake.tools(), ToolCatalog.dbQueryName,
+            ["db": .string("ExtChatDB"), "sql": .string("SELECT channel_name FROM channel_metadata")])
+        #expect(!declaredError)
+        #expect(declared.contains("Invented"))
+
+        let (master, masterError) = await call(
+            fake.tools(), ToolCatalog.dbQueryName,
+            ["db": .string("ExtChatDB"), "sql": .string("SELECT count(*) FROM sqlite_master")])
+        #expect(!masterError)
+        #expect(master.contains("\n4"))
+
+        let (undeclared, undeclaredError) = await call(
+            fake.tools(), ToolCatalog.dbQueryName,
+            ["db": .string("ExtChatDB"), "sql": .string("SELECT * FROM not_a_table")])
+        #expect(undeclaredError)
+        #expect(!undeclared.isEmpty)
+    }
+
     @Test("The rest of the same databases stays readable")
     func neighbouringColumnsStayReadable() async throws {
         let fake = try container()

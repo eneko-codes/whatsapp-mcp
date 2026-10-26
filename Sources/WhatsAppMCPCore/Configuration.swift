@@ -17,10 +17,10 @@ public struct Configuration: Sendable, Equatable {
     /// run can be pointed elsewhere without the live file ever being opened.
     public var databasePath: String = Configuration.defaultDatabasePath
 
-    /// Where the private copies read by `db_*` are kept — the only place this server
-    /// writes. Overridable from the command line so a manual run or a test never touches
-    /// the real cache.
-    public var cacheDirectory: String = SnapshotCache.defaultCacheDirectory.path
+    /// Where transcripts and the scratch folder are kept — the only place this server
+    /// writes. No database content goes there. Overridable from the command line so a
+    /// manual run or a test never touches the real cache.
+    public var cacheDirectory: String = ContainerDatabases.defaultCacheDirectory.path
 
     /// The `ffmpeg` that converts what macOS cannot open itself: a video's sound track and
     /// containers like Matroska.

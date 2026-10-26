@@ -22,7 +22,9 @@ And a read-only escape hatch over any allow-listed database: `db_tables`, `db_sc
 `db_query`.
 
 **It writes in exactly one place**: `~/Library/Caches/whatsapp-mcp/`, its own cache — see
-[The cache](#the-cache). Nothing is ever written into WhatsApp's container.
+[The cache](#the-cache) — and no database content goes there. Nothing is written into
+WhatsApp's container; the one thing a read changes there is a database's `-shm` index file,
+explained in [the rules](#the-rules-worth-knowing-before-you-use-it).
 
 A message reads as what it is — text with its mentions resolved, a photo, a voice note with
 its length, a sticker, a document, a shared location with its coordinates, a shared contact
@@ -65,15 +67,15 @@ and macOS ties that grant to the exact program: every rebuilt or updated copy ne
 | `address_book_list` | read | WhatsApp's own copy of your address book, searched ignoring case and accents. |
 | `lid_lookup` | read | Every LID↔phone pairing and name WhatsApp recorded for a value, each labelled with its table. Coverage is not measured. |
 | `channels_list` | read | Channels this Mac knows about. |
-| `db_tables`, `db_schema`, `db_query` | read | Tables, structure, and one `SELECT` against any allow-listed database. Rows and time are capped; key material and raw protocol queues are refused. |
+| `db_tables`, `db_schema`, `db_query` | read | Tables, structure, and one `SELECT` against any allow-listed database. Rows and time are capped; only tables the database itself declares can be read, and key material and raw protocol queues are refused. |
 
-No tool changes WhatsApp. Several do write the cache, and the `readOnlyHint` they declare is
-about WhatsApp and the files it keeps, not about the cache: `audio_transcribe` declares itself
-not read-only because storing its result is the point; every tool that reads a database
-through a private copy (`db_*`, `calls_list`, `location_sharing_list`, `labels_list`,
-`address_book_list`, `lid_lookup`, `channels_list`) writes that copy, and says when it was
-taken; `media_view` on a video writes a transcript when it is given a `language`. A test walks
-the catalogue and fails if any tool other than `audio_transcribe` stops declaring itself
+No tool changes WhatsApp. Two write the cache, and the `readOnlyHint` they declare is about
+WhatsApp and the files it keeps, not about the cache: `audio_transcribe` declares itself not
+read-only because storing its result is the point, and `media_view` on a video writes a
+transcript when it is given a `language`. Every tool that reads a database (`db_*`,
+`calls_list`, `location_sharing_list`, `labels_list`, `address_book_list`, `lid_lookup`,
+`channels_list`) reads it live, copies nothing and says when it was read. A test walks the
+catalogue and fails if any tool other than `audio_transcribe` stops declaring itself
 read-only; it does not check which tools write the cache, so this paragraph is what says so.
 
 Not covered: WhatsApp **status updates** — the structure of that database could not be
@@ -91,7 +93,6 @@ macOS asks, grant it.
 | Used | For | Reference |
 |---|---|---|
 | SQLite C API — `sqlite3_open_v2`, prepared statements, `sqlite3_create_function_v2` | Every read, over `file:…?mode=ro`, inside one read transaction, with `PRAGMA query_only` on; `wa_contains` does accent- and case-insensitive matching | [SQLite C API](https://www.sqlite.org/c3ref/intro.html), [URI filenames](https://www.sqlite.org/uri.html) |
-| `sqlite3_backup_*` | The cache copies, read through the source's log into a file this server owns | [Online backup API](https://www.sqlite.org/backup.html) |
 | `sqlite3_set_authorizer`, progress handler, `SQLITE_LIMIT_LENGTH` | Keeping `db_query` away from key material and bounding its cost | [Authorizer](https://www.sqlite.org/c3ref/set_authorizer.html) |
 | `Speech` — `SpeechAnalyzer`, `SpeechTranscriber` (macOS 26+) | On-device transcription; no server path, no model download | [Speech](https://developer.apple.com/documentation/speech) |
 | Protocol-buffers wire format, read by hand (`ProtobufWire`; no library) | A message's reactions (`ZWAMESSAGEINFO.ZRECEIPTINFO`) and the quote inside a reply (`ZWAMEDIAITEM.ZMETADATA`). WhatsApp publishes no schema, so an unrecognised shape yields nothing rather than a guess | [Encoding](https://protobuf.dev/programming-guides/encoding/) |
@@ -111,15 +112,15 @@ and cannot be reached by any name or path.
 
 ## The cache
 
-`~/Library/Caches/whatsapp-mcp/` holds copies of WhatsApp's databases (refreshed when the
-source file or its `-wal` changes), saved transcripts, and a scratch folder deleted after each conversion.
-It is **real message data in plaintext**, readable only by your user, and it stays until you
-delete it — remove the folder to remove it all. `--cache-directory` moves it. A copy is
-emptied, as it is made, of the key material `db_query` refuses to return (feature keys, media
-keys, the key-value blobs and the protocol queues) and rebuilt so that nothing WhatsApp had
-already deleted survives in it; the rest of each database is copied as it is. This server
-writes nowhere else: SQLite and the Apple frameworks it calls may use the system's temporary
-files for their own transient work.
+`~/Library/Caches/whatsapp-mcp/` holds saved transcripts and a scratch folder deleted after
+each conversion. A transcript is the text of one of your voice notes, readable only by your
+user, and it stays until you delete it — remove the folder to remove it all.
+`--cache-directory` moves it. **No database content is copied or kept**: every database is
+read live. Versions before 1.4.0 kept scrubbed copies of WhatsApp's databases here
+(`<Name>.sqlite` and `<Name>.stamp.json`); they were real message data in plaintext, nothing
+reads them any more, and they are not removed by an update — delete them (see Uninstalling).
+This server writes nowhere else: SQLite and the Apple frameworks it calls may use the
+system's temporary files for their own transient work.
 
 ## Logs
 
@@ -167,8 +168,9 @@ identity would keep the grant across rebuilds, but a certificate's subject carri
 of whoever holds it, so a binary meant to be published must not be signed with a personal one.
 
 **Uninstalling:** remove the extension in Claude, remove the `whatsapp-mcp` entry from Full
-Disk Access, and delete the cache (`rm -rf ~/Library/Caches/whatsapp-mcp` — it holds
-plaintext copies of your WhatsApp data and is not removed with the extension).
+Disk Access, and delete the cache (`rm -rf ~/Library/Caches/whatsapp-mcp` — transcripts, and
+on a Mac that ran a version before 1.4.0, plaintext copies of your WhatsApp databases; it is
+not removed with the extension).
 
 ## The rules worth knowing before you use it
 
@@ -275,10 +277,12 @@ display name collide.
 
 - **No LID→phone-number mapping exists in the chat database.** A `…@lid` sender this server
   cannot name stays a LID there; `lid_lookup` may find a pairing elsewhere, or nothing.
-- **A copy is only as new as its last refresh.** A copy is retaken when the source or its
-  log has changed, which for a busy database means a new copy — the database's own size,
-  not the log's — after each change. A transaction WhatsApp has not committed yet is not in
-  one; every answer says when its copy was taken.
+- **A transaction WhatsApp has not committed yet is not visible.** Reads go through the
+  write-ahead log, so everything committed is; every answer from a database other than the
+  chat store says when it was read.
+- **`db_query` cannot use SQLite's own virtual tables or table-valued functions** — `dbstat`,
+  `json_each`, `pragma_*` and the like — because they are not tables the database declares.
+  `db_schema` shows structure, and a recursive CTE still works.
 - **Transcripts can be wrong**, and are labelled automatic. Basque and Catalan are refused.
 - **Status updates have no tool**, because their database's structure could not be verified.
 - **No disappearing-message setting is exposed**, because none exists in WhatsApp's local
@@ -313,10 +317,10 @@ it needs the en-US speech model). See `CLAUDE.md`, whose
 hard rule at the top is what makes that non-negotiable.
 
 Manual verification against a real WhatsApp database is the owner's job, and is done on a
-copy: put a copy of `ChatStorage.sqlite` (and, for attachments, the files it names under
-`Message/`) in a temporary directory and start the server with `--database <that copy>` and
-`--cache-directory <another temporary directory>`, so neither the live container nor the real
-cache is touched. Delete both afterwards.
+copy: put a copy of `ChatStorage.sqlite` together with its `-wal` and `-shm` files (and, for
+attachments, the files it names under `Message/`) in a temporary directory and start the
+server with `--database <that copy>` and `--cache-directory <another temporary directory>`,
+so neither the live container nor the real cache is touched. Delete both afterwards.
 
 ## Licence
 
