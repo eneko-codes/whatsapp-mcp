@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 
 /// Routes a `tools/call` to the store and renders the answer.
 ///
@@ -9,7 +8,7 @@ import MCP
 /// This server never changes WhatsApp. There is no sender, no shortcut and no Apple
 /// event anywhere beneath this type, so no tool routed here can reach outside this Mac;
 /// the only file a tool makes is a scratch directory, deleted when the call ends.
-public struct WhatsAppTools: Sendable {
+public struct WhatsAppTools: ToolHandler {
     private let store: any WhatsAppStore
     private let explorer: (any DatabaseExplorer)?
     private let reader: (any DomainReader)?
@@ -32,36 +31,31 @@ public struct WhatsAppTools: Sendable {
         self.format = Format(calendar: calendar)
     }
 
-    public func handle(_ parameters: CallTool.Parameters) async -> CallTool.Result {
+    public func handle(_ parameters: ToolCall) async -> ToolOutput {
         let started = ContinuousClock.now
         do {
-            return .init(content: try await contents(parameters), isError: false)
+            return ToolOutput(content: try await contents(parameters), isError: false)
         } catch let error as ToolError {
             Diagnostics.toolFailed(parameters.name, error: error, since: started)
-            return .init(
-                content: [.text(text: error.message, annotations: nil, _meta: nil)], isError: true)
+            return ToolOutput(text: error.message, isError: true)
         } catch {
             Diagnostics.toolFailed(parameters.name, error: error, since: started)
-            return .init(
-                content: [
-                    .text(
-                        text: ToolError.storeFailure(error.localizedDescription).message,
-                        annotations: nil, _meta: nil)
-                ], isError: true)
+            return ToolOutput(
+                text: ToolError.storeFailure(error.localizedDescription).message, isError: true)
         }
     }
 
     /// Every tool answers with text except `media_view`, which also returns images.
-    private func contents(_ parameters: CallTool.Parameters) async throws -> [Tool.Content] {
+    private func contents(_ parameters: ToolCall) async throws -> [ToolOutput.Block] {
         if parameters.name == ToolCatalog.mediaViewName {
             let availability = store.availability()
             guard availability.isUsable else { throw ToolError.storeUnavailable(availability) }
             return try await mediaView(Arguments(parameters.arguments, calendar: calendar))
         }
-        return [.text(text: try await run(parameters), annotations: nil, _meta: nil)]
+        return [.text(try await run(parameters))]
     }
 
-    private func run(_ parameters: CallTool.Parameters) async throws -> String {
+    private func run(_ parameters: ToolCall) async throws -> String {
         let arguments = Arguments(parameters.arguments, calendar: calendar)
 
         // Answered before the availability check: "why can nothing be read" is exactly the
@@ -273,9 +267,9 @@ public struct WhatsAppTools: Sendable {
         }
     }
 
-    private func mediaView(_ arguments: Arguments) async throws -> [Tool.Content] {
+    private func mediaView(_ arguments: Arguments) async throws -> [ToolOutput.Block] {
         let (message, attachment, url) = try await attachment(arguments)
-        func text(_ value: String) -> Tool.Content { .text(text: value, annotations: nil, _meta: nil) }
+        func text(_ value: String) -> ToolOutput.Block { .text(value) }
         guard let url else { return [text(format.mediaMissing(message, attachment: attachment))] }
 
         let heading = format.mediaHeading(message, attachment: attachment)
@@ -284,15 +278,15 @@ public struct WhatsAppTools: Sendable {
             case .photo, .sticker, .gif:
                 let jpeg = try MediaFiles.jpegData(of: url)
                 return [
-                    .image(data: jpeg.base64EncodedString(), mimeType: "image/jpeg", annotations: nil, _meta: nil),
+                    .image(data: jpeg.base64EncodedString(), mimeType: "image/jpeg"),
                     text(heading),
                 ]
 
             case .video:
                 let count = try arguments.int("frames", default: 4, in: 1...8)
                 let (frames, seconds) = try await MediaFiles.keyFrames(of: url, count: count)
-                var content: [Tool.Content] = frames.map {
-                    .image(data: $0.base64EncodedString(), mimeType: "image/jpeg", annotations: nil, _meta: nil)
+                var content: [ToolOutput.Block] = frames.map {
+                    .image(data: $0.base64EncodedString(), mimeType: "image/jpeg")
                 }
                 var summary = heading + "\n\(frames.count) frames, evenly spaced over \(Int(seconds.rounded())) s."
                 // Best effort and only when asked: the frames are the answer and the sound is

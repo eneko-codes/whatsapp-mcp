@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 import Testing
 
 @testable import WhatsAppMCPCore
@@ -129,14 +128,14 @@ struct ArgumentAndDateTests {
 
         func run(_ arguments: [String: Value]) async -> (String, Bool) {
             let result = await tools.handle(.init(name: ToolCatalog.chatGetName, arguments: arguments))
-            guard case .text(let text, _, _) = result.content.first else { return ("", true) }
-            return (text, result.isError ?? false)
+            guard case .text(let text) = result.content.first else { return ("", true) }
+            return (text, result.isError)
         }
 
         func runChats(_ arguments: [String: Value]) async -> (String, Bool) {
             let result = await tools.handle(.init(name: ToolCatalog.chatsName, arguments: arguments))
-            guard case .text(let text, _, _) = result.content.first else { return ("", true) }
-            return (text, result.isError ?? false)
+            guard case .text(let text) = result.content.first else { return ("", true) }
+            return (text, result.isError)
         }
 
         let (typo, typoError) = await run(["chat_id": .int(1), "from_me": .string("maybe")])

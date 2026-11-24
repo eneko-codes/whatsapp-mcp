@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 import SQLite3
 import Testing
 
@@ -97,8 +96,8 @@ func call(
     _ tools: WhatsAppTools, _ name: String, _ arguments: [String: Value]
 ) async -> (text: String, isError: Bool) {
     let result = await tools.handle(.init(name: name, arguments: arguments))
-    guard case .text(let text, _, _) = result.content.first else { return ("(none)", true) }
-    return (text, result.isError ?? false)
+    guard case .text(let text) = result.content.first else { return ("(none)", true) }
+    return (text, result.isError)
 }
 
 @Suite("Allowed databases")

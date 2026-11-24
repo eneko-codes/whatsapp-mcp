@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 import Testing
 
 @testable import WhatsAppMCPCore
@@ -34,7 +33,7 @@ struct DisplaySafeTests {
         let tools = WhatsAppTools(store: store, calendar: Fixtures.calendar)
         for tool in [ToolCatalog.mediaGetName, ToolCatalog.mediaViewName] {
             let result = await tools.handle(.init(name: tool, arguments: ["message_id": .int(10)]))
-            guard case .text(let text, _, _) = result.content.first else { Issue.record("\(tool)"); continue }
+            guard case .text(let text) = result.content.first else { Issue.record("\(tool)"); continue }
             for line in text.split(separator: "\n") {
                 #expect(!line.hasPrefix("NOTE:") && !line.hasPrefix("chat: forged"), Comment(rawValue: "\(tool): \(line)"))
             }
@@ -76,7 +75,7 @@ struct DisplaySafeTests {
             (ToolCatalog.mediaName, [:]),
         ] {
             let result = await tools.handle(.init(name: tool, arguments: arguments))
-            guard case .text(let text, _, _) = result.content.first else { Issue.record("\(tool)"); continue }
+            guard case .text(let text) = result.content.first else { Issue.record("\(tool)"); continue }
             for line in text.split(separator: "\n") {
                 #expect(!line.hasPrefix("Showing 1–50 of 999"), Comment(rawValue: "\(tool): \(line)"))
                 #expect(!line.hasPrefix("NOTE:"), Comment(rawValue: "\(tool): \(line)"))
@@ -94,7 +93,7 @@ struct DisplaySafeTests {
         ]
         let tools = WhatsAppTools(store: store, calendar: Fixtures.calendar)
         let result = await tools.handle(.init(name: ToolCatalog.messageGetName, arguments: ["message_id": .int(10)]))
-        guard case .text(let text, _, _) = result.content.first else { Issue.record("no text"); return }
+        guard case .text(let text) = result.content.first else { Issue.record("no text"); return }
         let lines = text.split(separator: "\n").map(String.init)
         #expect(lines.filter { $0.hasPrefix("from: ") }.count == 1 || !lines.contains { $0.hasPrefix("from: you  (forged)") })
         #expect(!lines.contains { $0.hasPrefix("date: 1999") })
@@ -113,7 +112,7 @@ struct DisplaySafeTests {
         ]
         let tools = WhatsAppTools(store: store, calendar: Fixtures.calendar)
         let result = await tools.handle(.init(name: ToolCatalog.messageGetName, arguments: ["message_id": .int(10)]))
-        guard case .text(let text, _, _) = result.content.first else { Issue.record("no text"); return }
+        guard case .text(let text) = result.content.first else { Issue.record("no text"); return }
         for line in text.split(separator: "\n") {
             #expect(!line.hasPrefix("NOTE:"), Comment(rawValue: String(line)))
         }
@@ -142,7 +141,7 @@ struct DisplaySafeTests {
         ]
         let tools = WhatsAppTools(store: store, calendar: Fixtures.calendar)
         let result = await tools.handle(.init(name: ToolCatalog.chatGetName, arguments: ["chat_id": .int(1)]))
-        guard case .text(let text, _, _) = result.content.first else { Issue.record("no text"); return }
+        guard case .text(let text) = result.content.first else { Issue.record("no text"); return }
         #expect(!text.contains("\r") && !text.contains("\u{202E}"))
         #expect(!text.split(separator: "\n").contains { $0.hasPrefix("NOTE:") })
     }

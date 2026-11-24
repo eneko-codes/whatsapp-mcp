@@ -1,10 +1,9 @@
 import Foundation
-import MCP
 
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.5.0"
+    public static let version = "1.5.1"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and keeps nothing, that
@@ -82,7 +81,7 @@ public enum WhatsAppMCPServer {
         reader: (any DomainReader)? = nil,
         transcription: TranscriptionService? = nil,
         configuration: Configuration = Configuration()
-    ) async throws {
+    ) async {
         let databases = ContainerDatabases(containerDirectory: configuration.containerDirectory)
         let mediaFiles = MediaFiles(containerDirectory: configuration.containerDirectory)
         let tools = WhatsAppTools(
@@ -97,27 +96,17 @@ public enum WhatsAppMCPServer {
                     converter: (configuration.ffmpegPath.map { URL(fileURLWithPath: $0) }
                         ?? FFmpegConverter.locate()).map { FFmpegConverter(executable: $0) },
                     engine: NativeSpeechTranscriber()))
-        let server = Server(
-            name: name,
-            version: version,
-            instructions: instructions,
-            capabilities: .init(tools: .init(listChanged: false))
-        )
-
-        await server.withMethodHandler(ListTools.self) { _ in
-            .init(tools: ToolCatalog.all())
-        }
-        await server.withMethodHandler(CallTool.self) { await tools.handle($0) }
-
-        // The default StdioTransport logger is a no-op handler. Leave it that way: a
-        // logger writing to stdout would interleave with the JSON-RPC stream and break
-        // every response after the first log line.
         ProcessCleanup.shared.installSignalHandlers()
         Diagnostics.started(version: version)
-        try await server.start(transport: StdioTransport())
-        await server.waitUntilCompleted()
+        await serveStandardStreams(handler: handler(tools: tools))
         // The client closed stdin. Work still in flight dies with the process, and its
         // temporary files and ffmpeg would outlive it.
         ProcessCleanup.shared.run()
+    }
+
+    public static func handler(tools: WhatsAppTools) -> MCPHandler {
+        MCPHandler(
+            name: name, version: version, instructions: instructions,
+            catalog: ToolCatalog.all(), tools: tools)
     }
 }
