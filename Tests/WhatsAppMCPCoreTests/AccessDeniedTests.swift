@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 import SQLite3
 import Testing
 
@@ -29,8 +28,8 @@ struct AccessDeniedTests {
         -> (text: String, isError: Bool)
     {
         let result = await tools.handle(.init(name: name, arguments: arguments))
-        guard case .text(let text, _, _) = result.content.first else { return ("", true) }
-        return (text, result.isError ?? false)
+        guard case .text(let text) = result.content.first else { return ("", true) }
+        return (text, result.isError)
     }
 
     @Test("The probe tells a readable file, a missing one and a refused one apart")

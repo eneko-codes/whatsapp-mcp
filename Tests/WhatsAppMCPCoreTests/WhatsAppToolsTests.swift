@@ -1,5 +1,4 @@
 import Foundation
-import MCP
 import Testing
 
 @testable import WhatsAppMCPCore
@@ -16,10 +15,10 @@ struct WhatsAppToolsTests {
     ) async -> (text: String, isError: Bool) {
         let tools = WhatsAppTools(store: store, calendar: Fixtures.calendar)
         let result = await tools.handle(.init(name: name, arguments: arguments))
-        guard case .text(let text, _, _) = result.content.first else {
+        guard case .text(let text) = result.content.first else {
             return ("(no text content)", true)
         }
-        return (text, result.isError ?? false)
+        return (text, result.isError)
     }
 
     private func stocked() -> FakeWhatsAppStore {
@@ -83,6 +82,17 @@ struct WhatsAppToolsTests {
         let data = try Data(contentsOf: root.appendingPathComponent("extension/manifest.json"))
         let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(manifest?["version"] as? String == WhatsAppMCPServer.version)
+    }
+
+    /// The server is built from the system's own frameworks and nothing else. A dependency
+    /// is a decision for the owner, so adding one has to break this test first.
+    @Test("The package declares no third-party dependency")
+    func noDependencies() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let package = try String(contentsOf: root.appendingPathComponent("Package.swift"), encoding: .utf8)
+        #expect(!package.contains(".package("), "Package.swift declares a dependency")
+        #expect(!package.contains(".product("))
     }
 
     /// Claude Desktop's schema sanitiser drops a property whose `type` is a union and

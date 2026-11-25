@@ -2,7 +2,6 @@ import AVFoundation
 import CryptoKit
 import Foundation
 import ImageIO
-import MCP
 import Testing
 import UniformTypeIdentifiers
 
@@ -46,19 +45,19 @@ private struct MediaFixture {
 
 private func contents(
     _ tools: WhatsAppTools, _ name: String, _ arguments: [String: Value]
-) async -> (content: [Tool.Content], isError: Bool) {
+) async -> (content: [ToolOutput.Block], isError: Bool) {
     let result = await tools.handle(.init(name: name, arguments: arguments))
-    return (result.content, result.isError ?? false)
+    return (result.content, result.isError)
 }
 
-private func texts(_ content: [Tool.Content]) -> String {
-    content.compactMap { if case .text(let text, _, _) = $0 { text } else { nil } }
+private func texts(_ content: [ToolOutput.Block]) -> String {
+    content.compactMap { if case .text(let text) = $0 { text } else { nil } }
         .joined(separator: "\n")
 }
 
-private func images(_ content: [Tool.Content]) -> [(data: Data, mime: String)] {
+private func images(_ content: [ToolOutput.Block]) -> [(data: Data, mime: String)] {
     content.compactMap {
-        if case .image(let base64, let mime, _, _) = $0, let data = Data(base64Encoded: base64) {
+        if case .image(let base64, let mime) = $0, let data = Data(base64Encoded: base64) {
             (data, mime)
         } else { nil }
     }

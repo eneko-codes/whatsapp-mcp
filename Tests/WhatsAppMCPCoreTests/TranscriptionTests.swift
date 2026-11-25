@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import MCP
 import Testing
 
 @testable import WhatsAppMCPCore
@@ -145,8 +144,8 @@ private func run(
     _ tools: WhatsAppTools, _ arguments: [String: Value]
 ) async -> (text: String, isError: Bool) {
     let result = await tools.handle(.init(name: ToolCatalog.audioTranscribeName, arguments: arguments))
-    guard case .text(let text, _, _) = result.content.first else { return ("(none)", true) }
-    return (text, result.isError ?? false)
+    guard case .text(let text) = result.content.first else { return ("(none)", true) }
+    return (text, result.isError)
 }
 
 @Suite("Audio transcription")
@@ -365,12 +364,12 @@ struct TranscriptionTests {
         let tools = fixture.tools(
             converter: try fixture.fakeFFmpeg(succeeding: false), messages: [video])
 
-        func view(_ arguments: [String: Value]) async -> (content: [Tool.Content], isError: Bool) {
+        func view(_ arguments: [String: Value]) async -> (content: [ToolOutput.Block], isError: Bool) {
             let result = await tools.handle(.init(name: ToolCatalog.mediaViewName, arguments: arguments))
-            return (result.content, result.isError ?? false)
+            return (result.content, result.isError)
         }
-        func summary(_ content: [Tool.Content]) -> String {
-            content.compactMap { if case .text(let text, _, _) = $0 { text } else { nil } }
+        func summary(_ content: [ToolOutput.Block]) -> String {
+            content.compactMap { if case .text(let text) = $0 { text } else { nil } }
                 .joined(separator: "\n")
         }
 
