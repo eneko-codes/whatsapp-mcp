@@ -1,5 +1,20 @@
 import Foundation
 
+/// A date as the caller wrote it: where it starts and where the precision it was written in
+/// ends. `from_date` uses the first and `to_date` the second, which is what makes `to_date`
+/// inclusive at that precision: "to 2026-08-12" includes all of that day, "to 09:00" the
+/// whole of that minute.
+public struct ParsedDate: Sendable, Equatable {
+    public let date: Date
+    /// The first instant after what the caller wrote.
+    public let end: Date
+
+    public init(date: Date, end: Date) {
+        self.date = date
+        self.end = end
+    }
+}
+
 /// Parsing and rendering of the three date forms this server accepts.
 ///
 /// Deliberately strict. A lenient parser that guesses at `10/08/2026` will one day read
@@ -8,50 +23,71 @@ import Foundation
 public enum DateParsing {
 
     public static let acceptedForms = """
-        - 2026-08-12                  midnight local time
+        - 2026-08-12                  a whole day, local time
         - 2026-08-12T09:00            local time
         - 2026-08-12T09:00:00+02:00   explicit offset
         """
 
-    public static func parse(_ raw: String, argument: String, calendar: Calendar) throws -> Date {
+    public static func parse(_ raw: String, argument: String, calendar: Calendar) throws
+        -> ParsedDate
+    {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let components = dayComponents(text) {
-            guard let day = calendar.date(from: components), sameDay(day, components, calendar)
+            // The start of the day, not midnight: where a clock change skips midnight the
+            // day still exists and starts an hour later. So the day is checked at noon,
+            // which every day has.
+            var noon = components
+            noon.hour = 12
+            guard let day = existing(noon, calendar: calendar),
+                let next = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: day))
             else { throw ToolError.badDate(argument: argument, value: text) }
-            return calendar.startOfDay(for: day)
+            return ParsedDate(
+                date: calendar.startOfDay(for: day), end: calendar.startOfDay(for: next))
         }
 
-        if let components = localComponents(text) {
-            guard let moment = calendar.date(from: components),
-                sameDay(moment, components, calendar)
-            else { throw ToolError.badDate(argument: argument, value: text) }
-            return moment
+        if let local = localComponents(text) {
+            guard let moment = existing(local.components, calendar: calendar) else {
+                throw ToolError.badDate(argument: argument, value: text)
+            }
+            return ParsedDate(
+                date: moment, end: moment.addingTimeInterval(local.hasSeconds ? 1 : 60))
         }
 
         // Only reached for a string carrying its own offset or Z suffix, where the
         // machine's time zone is irrelevant.
-        let optionSets: [ISO8601DateFormatter.Options] = [
-            [.withInternetDateTime],
-            [.withInternetDateTime, .withFractionalSeconds],
+        let optionSets: [(options: ISO8601DateFormatter.Options, unit: TimeInterval)] = [
+            ([.withInternetDateTime], 1),
+            ([.withInternetDateTime, .withFractionalSeconds], 0.001),
         ]
-        for options in optionSets {
+        for (options, unit) in optionSets {
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = options
             // ISO8601DateFormatter is as lenient as Calendar: 2026-02-30T09:00:00+02:00 is 2
             // March. The day the string names must be a real one, whatever its offset.
-            if let moment = formatter.date(from: text), namesARealDay(text) { return moment }
+            if let moment = formatter.date(from: text), namesARealDay(text) {
+                return ParsedDate(date: moment, end: moment.addingTimeInterval(unit))
+            }
         }
 
         throw ToolError.badDate(argument: argument, value: text)
     }
 
-    /// `Calendar.date(from:)` is lenient: 2026-02-30 becomes 2 March and nothing says so, so
-    /// the caller reads an answer about a range they did not ask for. Reading the date back
-    /// and comparing it to what was typed refuses every day that does not exist. Only the
-    /// day is compared, not the hour: a local time that falls in a spring-forward gap does
-    /// not exist either, and moving it to the next valid minute is the one adjustment that
-    /// is both unambiguous and what the clock on the wall did.
+    /// The moment the components name, or `nil` when the calendar has no such moment: 30
+    /// February, or a local time a clock change skips. `Calendar.date(from:)` would roll
+    /// either one forward to a moment that does exist, and a search would then answer about
+    /// a time nobody asked for. Only the fields the caller wrote are compared.
+    private static func existing(_ components: DateComponents, calendar: Calendar) -> Date? {
+        guard let date = calendar.date(from: components) else { return nil }
+        let found = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let written: [(Int?, Int?)] = [
+            (components.year, found.year), (components.month, found.month),
+            (components.day, found.day), (components.hour, found.hour),
+            (components.minute, found.minute), (components.second, found.second),
+        ]
+        return written.allSatisfy { asked, got in asked == nil || asked == got } ? date : nil
+    }
+
     private static func sameDay(_ date: Date, _ components: DateComponents, _ calendar: Calendar)
         -> Bool
     {
@@ -83,7 +119,9 @@ public enum DateParsing {
     }
 
     /// `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS`, with no offset suffix.
-    private static func localComponents(_ text: String) -> DateComponents? {
+    private static func localComponents(_ text: String)
+        -> (components: DateComponents, hasSeconds: Bool)?
+    {
         let halves = text.split(separator: "T", omittingEmptySubsequences: false)
         guard halves.count == 2, var day = dayComponents(String(halves[0])) else { return nil }
 
@@ -103,7 +141,7 @@ public enum DateParsing {
         day.hour = hour
         day.minute = minute
         day.second = second
-        return day
+        return (day, pieces.count == 3)
     }
 
     // MARK: Rendering

@@ -54,22 +54,22 @@ again after every rebuild or update — see [Permissions](#permissions).
 | Tool | Kind | What it does |
 |---|---|---|
 | `whatsapp_status` | read | Reports whether WhatsApp's local database can be read, how much is in it, what WhatsApp does not store locally at all, and what to do about anything missing. Reads no messages. |
-| `chats_list` | read | Lists conversations with their id, kind, unread count, how many messages are stored, and when the last one arrived. |
+| `chats_list` | read | Lists conversations, latest activity first, with their id, kind, unread count, how many messages are stored, and when the last one arrived. Archived and hidden chats are counted and left out unless asked for. |
 | `chat_get` | read | A page of messages from one chat, newest first by default, each line saying who sent it and what the message is. `↩N` marks a reply to message N, `[❤️ 😮]` the reactions on a message, `★` a starred one; `message_get` opens them up. |
 | `whatsapp_search` | read | Finds messages whose text contains a phrase, across every chat or within one. Ignores case and accents, so "angel" finds "Ángel". With `starred_only` the phrase can be left out, which lists every starred message in every chat. |
-| `message_get` | read | Everything the database holds about one message: mentions, both timestamps, an attachment's path/size/length/author, a shared contact's full vCard, a link preview, a group event's actor and subject, the message it replies to (with the quoted words), who reacted with which emoji and when, and the raw delivery and error codes. |
+| `message_get` | read | Everything the database holds about one message, whole, a window at a time: mentions, both timestamps, an attachment's path/size/length/author, a shared contact's full vCard, a link preview, a group event's actor and subject, the message it replies to (with the quoted words), who reacted with which emoji and when, and the raw delivery and error codes. |
 | `media_list` | read | What was shared rather than said — photos, videos, GIFs, stickers, voice notes, audio, documents, locations, contact cards — with the message id each belongs to and the file's path on this Mac when it's here. |
-| `group_get` | read | A group's own metadata (created when, by whom, name last changed) and every member row with its address, resolved name and admin flag. |
+| `group_get` | read | A group's own metadata (created when, by whom, name last changed) and its member rows by address, each with its resolved name and admin flag. |
 | `media_get` | read | The facts about the file behind an attachment: real path under `Message/`, MIME type, exact size, SHA-256, chat, sender and date. Says so when the file is not on this Mac. |
-| `media_view` | read | What is inside an attachment: a photo, sticker or GIF as an image reduced to 1568 px, a PDF or text document as text (a scan says it has no text layer), a video as still frames. |
-| `audio_transcribe` | read | A voice note, audio file or a video's sound as text with times, using macOS's on-device speech recognition. Needs the language as a full tag; Basque and Catalan are not supported and are refused, not guessed. |
+| `media_view` | read | What is inside an attachment: a photo, sticker or GIF as one reduced image, a PDF (by page range) or text document as text a window at a time (a scan says it has no text layer), a video as still frames. |
+| `audio_transcribe` | read | A voice note, audio file or a video's sound as text with times, a window at a time, using macOS's on-device speech recognition. Needs the language as a full tag; Basque and Catalan are not supported and are refused, not guessed. |
 | `calls_list` | read | Calls from `CallHistory`: when, how long, direction, missed, video or voice, group, participants. The outcome is the stored number, not a guessed word. |
 | `location_sharing_list` | read | Live-location sharing sessions you started and who they went to. Coordinates are not decoded. |
 | `labels_list` | read | WhatsApp Business labels, and what carries each. |
 | `address_book_list` | read | WhatsApp's own copy of your address book, searched ignoring case and accents. |
 | `lid_lookup` | read | Every LID↔phone pairing and name WhatsApp recorded for a value, each labelled with its table. Coverage is not measured. |
 | `channels_list` | read | Channels this Mac knows about. |
-| `db_tables`, `db_schema`, `db_query` | read | Tables, structure, and one `SELECT` against any allow-listed database. Rows and time are capped; only tables the database itself declares can be read, and key material and raw protocol queues are refused. |
+| `db_tables`, `db_schema`, `db_query` | read | Tables, structure, and one `SELECT` against any allow-listed database, a page at a time. Values are clipped and time is capped; only tables the database itself declares can be read, and key material and raw protocol queues are refused. |
 
 No tool changes WhatsApp, and none keeps anything: every tool declares itself read-only, and
 a test walks the catalogue and fails if one stops. `audio_transcribe` and `media_view` on a
@@ -177,6 +177,27 @@ a personal one.
 Disk Access, and delete `~/Library/Caches/whatsapp-mcp` (`rm -rf` it) — on a Mac that ran an
 earlier version it may still hold plaintext copies of your WhatsApp databases or transcripts
 of your voice notes, and it is not removed with the extension.
+
+## How much one answer holds
+
+Every answer is bounded, so that no client has to cope with a result too large to pass on,
+and every answer says what it left out, in its first lines and in the same words everywhere:
+
+- **Listings come a page at a time**, in an order they state. `limit` and `offset` reach the
+  rest; a result that does not hold every row says how many there are and the `offset` of the
+  next page. Archived and hidden chats are counted when they are left out.
+- **A row clips the fields other people write at any length** — a message's text, a file
+  name, a link — and says so; `message_get` returns the message whole.
+- **One long text** (a message, a document, a transcript) comes a window at a time:
+  `character_offset` and `max_characters`. A PDF is also read by `first_page` and `last_page`.
+- **Dates are `from_date` and `to_date`**, both inclusive: a day given as `to_date` includes
+  the whole of that day. Before 2.0.0 they were `after` and `before`, and an argument a tool
+  does not take is now refused rather than ignored.
+- **A call has a deadline.** One that cannot finish in time is abandoned with an error that
+  says how to ask for less. A recording too long to recognise within it cannot be transcribed.
+
+The figures (page sizes, widths, the deadline) are in each tool's own description, quoted
+from the constants the code enforces.
 
 ## The rules worth knowing before you use it
 

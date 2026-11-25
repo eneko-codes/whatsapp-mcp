@@ -11,9 +11,10 @@ public struct MessageQuery: Sendable, Equatable {
     public var chatID: Int64?
     /// Case-insensitive substring of the message text.
     public var text: String?
-    /// Inclusive lower bound.
-    public var after: Date?
-    /// Exclusive upper bound, so two adjacent ranges neither overlap nor drop a message.
+    /// Inclusive lower bound: where `from_date` starts.
+    public var from: Date?
+    /// Exclusive upper bound: the first instant `to_date` leaves out, so `to_date` is
+    /// inclusive at the precision it was written in.
     public var before: Date?
     public var fromMe: Bool?
     /// Which media kinds to keep. Empty means no kind filter at all, which is right for
@@ -27,13 +28,13 @@ public struct MessageQuery: Sendable, Equatable {
     public var newestFirst: Bool
 
     public init(
-        chatID: Int64? = nil, text: String? = nil, after: Date? = nil, before: Date? = nil,
+        chatID: Int64? = nil, text: String? = nil, from: Date? = nil, before: Date? = nil,
         fromMe: Bool? = nil, kinds: [MediaKind] = [], starredOnly: Bool = false,
-        limit: Int = 50, offset: Int = 0, newestFirst: Bool = true
+        limit: Int = Configuration.defaultMessageLimit, offset: Int = 0, newestFirst: Bool = true
     ) {
         self.chatID = chatID
         self.text = text
-        self.after = after
+        self.from = from
         self.before = before
         self.fromMe = fromMe
         self.kinds = kinds
@@ -41,6 +42,24 @@ public struct MessageQuery: Sendable, Equatable {
         self.limit = limit
         self.offset = offset
         self.newestFirst = newestFirst
+    }
+}
+
+/// One page of chats, with what matched and what the filters held back.
+public struct ChatPage: Sendable, Equatable {
+    public let rows: [Chat]
+    /// Every chat the query matched, not only this page.
+    public let total: Int
+    /// Chats that would have matched but for `include_archived` and `include_hidden`. Zero
+    /// when the flag was passed, since nothing was held back.
+    public let archivedNotShown: Int
+    public let hiddenNotShown: Int
+
+    public init(rows: [Chat], total: Int, archivedNotShown: Int = 0, hiddenNotShown: Int = 0) {
+        self.rows = rows
+        self.total = total
+        self.archivedNotShown = archivedNotShown
+        self.hiddenNotShown = hiddenNotShown
     }
 }
 
@@ -58,7 +77,7 @@ public struct ChatQuery: Sendable, Equatable {
 
     public init(
         name: String? = nil, kinds: [ChatKind] = [], includeArchived: Bool = false,
-        includeHidden: Bool = false, limit: Int = 50, offset: Int = 0
+        includeHidden: Bool = false, limit: Int = Configuration.defaultLimit, offset: Int = 0
     ) {
         self.name = name
         self.kinds = kinds
@@ -103,7 +122,7 @@ public protocol WhatsAppStore: Sendable {
     func availability() -> StoreAvailability
     func databaseInfo() -> DatabaseInfo
 
-    func chats(matching query: ChatQuery) async throws -> [Chat]
+    func chats(matching query: ChatQuery) async throws -> ChatPage
     func chat(id: Int64) async throws -> Chat?
     func messages(matching query: MessageQuery) async throws -> MessagePage
 

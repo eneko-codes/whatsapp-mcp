@@ -385,6 +385,49 @@ struct TranscriptionTests {
         #expect(failed.filter { if case .image = $0 { true } else { false } }.count == 2)
     }
 
+    @Test("A video's transcript comes a window at a time, its notice first and the frames after")
+    func videoTranscriptWindows() async throws {
+        let fixture = try TranscriptionFixture()
+        defer { fixture.remove() }
+        fixture.engine.segments = (0..<40).map {
+            TranscriptSegment(start: Double($0), end: Double($0) + 1, text: "invented words \($0)")
+        }
+        let clip = fixture.media.appendingPathComponent("clip.mp4")
+        try await makeVideo(at: clip)
+        let video = Fixtures.message(
+            id: 9, chatID: 1, chatName: "Ane", text: nil,
+            body: Fixtures.attachment(.video, path: clip.path))
+        let tools = fixture.tools(converter: try fixture.fakeFFmpeg(), messages: [video])
+        let whole = Format(calendar: Fixtures.calendar).transcriptText(
+            Transcription(localeIdentifier: "es-ES", durationSeconds: 1, segments: fixture.engine.segments))
+
+        func view(_ offset: Int) async -> [ToolOutput.Block] {
+            await tools.handle(
+                .init(
+                    name: ToolCatalog.mediaViewName,
+                    arguments: [
+                        "message_id": .int(9), "frames": .int(1), "language": .string("es-ES"),
+                        "character_offset": .int(offset), "max_characters": .int(300),
+                    ])
+            ).content
+        }
+        let first = await view(0)
+        guard case .text(let text) = first.first else {
+            Issue.record("the text does not come first")
+            return
+        }
+        #expect(text.hasPrefix("Transcript: characters 1–300 of \(whole.count). Pass character_offset=300 for the rest.\n\n"))
+        #expect(text.hasSuffix(String(whole.prefix(300))))
+        #expect(first.dropFirst().allSatisfy { if case .image = $0 { true } else { false } })
+
+        guard case .text(let next) = await view(300).first else {
+            Issue.record("no text")
+            return
+        }
+        #expect(next.hasPrefix("Transcript: characters 301–600 of \(whole.count)."))
+        #expect(next.hasSuffix(String(whole.dropFirst(300).prefix(300))))
+    }
+
     @Test("A failing ffmpeg is reported with its own message and leaves nothing behind")
     func failingConverterIsReported() async throws {
         let fixture = try TranscriptionFixture()

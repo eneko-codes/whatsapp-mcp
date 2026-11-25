@@ -25,18 +25,22 @@ final class FakeWhatsAppStore: WhatsAppStore, @unchecked Sendable {
     func availability() -> StoreAvailability { availabilityValue }
     func databaseInfo() -> DatabaseInfo { info }
 
-    func chats(matching query: ChatQuery) async throws -> [Chat] {
+    func chats(matching query: ChatQuery) async throws -> ChatPage {
         if let failure { throw failure }
         lastChatQuery = query
 
-        var matched = chatsValue
+        var chosen = chatsValue
         if let name = query.name?.lowercased(), !name.isEmpty {
-            matched = matched.filter { $0.name.lowercased().contains(name) }
+            chosen = chosen.filter { $0.name.lowercased().contains(name) }
         }
-        if !query.kinds.isEmpty { matched = matched.filter { query.kinds.contains($0.kind) } }
-        if !query.includeArchived { matched = matched.filter { !$0.isArchived } }
-        if !query.includeHidden { matched = matched.filter { $0.isHidden != true } }
-        return Array(matched.dropFirst(query.offset).prefix(query.limit))
+        if !query.kinds.isEmpty { chosen = chosen.filter { query.kinds.contains($0.kind) } }
+        let archived = { (chat: Chat) in query.includeArchived || !chat.isArchived }
+        let hidden = { (chat: Chat) in query.includeHidden || chat.isHidden != true }
+        let matched = chosen.filter { archived($0) && hidden($0) }
+        return ChatPage(
+            rows: Array(matched.dropFirst(query.offset).prefix(query.limit)), total: matched.count,
+            archivedNotShown: query.includeArchived ? 0 : chosen.filter { $0.isArchived && hidden($0) }.count,
+            hiddenNotShown: query.includeHidden ? 0 : chosen.filter { $0.isHidden == true && archived($0) }.count)
     }
 
     func chat(id: Int64) async throws -> Chat? {
@@ -53,7 +57,7 @@ final class FakeWhatsAppStore: WhatsAppStore, @unchecked Sendable {
         if let text = query.text?.lowercased(), !text.isEmpty {
             matched = matched.filter { ($0.text ?? "").lowercased().contains(text) }
         }
-        if let after = query.after { matched = matched.filter { $0.date >= after } }
+        if let from = query.from { matched = matched.filter { $0.date >= from } }
         if let before = query.before { matched = matched.filter { $0.date < before } }
         if let fromMe = query.fromMe { matched = matched.filter { $0.isFromMe == fromMe } }
         if query.starredOnly { matched = matched.filter(\.isStarred) }
@@ -64,7 +68,12 @@ final class FakeWhatsAppStore: WhatsAppStore, @unchecked Sendable {
             }
         }
 
-        matched.sort { query.newestFirst ? $0.date > $1.date : $0.date < $1.date }
+        // Ties go by id, as the real store's ORDER BY does.
+        matched.sort {
+            $0.date == $1.date
+                ? (query.newestFirst ? $0.id > $1.id : $0.id < $1.id)
+                : (query.newestFirst ? $0.date > $1.date : $0.date < $1.date)
+        }
         let page = Array(matched.dropFirst(query.offset).prefix(query.limit))
         return MessagePage(rows: page, total: matched.count)
     }

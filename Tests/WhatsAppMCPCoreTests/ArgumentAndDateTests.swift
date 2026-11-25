@@ -13,7 +13,7 @@ struct ArgumentAndDateTests {
     }()
 
     private func parse(_ text: String) throws -> Date {
-        try DateParsing.parse(text, argument: "after", calendar: madrid)
+        try DateParsing.parse(text, argument: "from_date", calendar: madrid).date
     }
 
     // MARK: Dates
@@ -27,7 +27,7 @@ struct ArgumentAndDateTests {
             "2026-02-30T09:00:00+02:00", "2026-04-31T09:00:00Z", "2025-02-29T00:00:00+01:00",
             "0000-01-01T00:00:00Z", "1899-12-31T23:00:00Z", "2026-13-01T00:00:00Z",
         ] {
-            #expect(throws: ToolError.badDate(argument: "after", value: text), "\(text)") {
+            #expect(throws: ToolError.badDate(argument: "from_date", value: text), "\(text)") {
                 try parse(text)
             }
         }
@@ -47,23 +47,48 @@ struct ArgumentAndDateTests {
     func halfHourFallBack() throws {
         var lordHowe = Calendar(identifier: .gregorian)
         lordHowe.timeZone = TimeZone(identifier: "Australia/Lord_Howe")!
-        let first = try DateParsing.parse("2026-04-04T14:45:00Z", argument: "after", calendar: lordHowe)
-        let second = try DateParsing.parse("2026-04-04T15:15:00Z", argument: "after", calendar: lordHowe)
+        let first = try DateParsing.parse("2026-04-04T14:45:00Z", argument: "from_date", calendar: lordHowe).date
+        let second = try DateParsing.parse("2026-04-04T15:15:00Z", argument: "from_date", calendar: lordHowe).date
         let firstText = DateParsing.roundTrip(first, calendar: lordHowe)
         let secondText = DateParsing.roundTrip(second, calendar: lordHowe)
         #expect(firstText != secondText, "\(firstText)")
         #expect(firstText.contains("+") && secondText.contains("+"))
-        #expect(try DateParsing.parse(firstText, argument: "after", calendar: lordHowe) == first)
-        #expect(try DateParsing.parse(secondText, argument: "after", calendar: lordHowe) == second)
-        let ordinary = try DateParsing.parse("2026-04-05T10:00", argument: "after", calendar: lordHowe)
+        #expect(try DateParsing.parse(firstText, argument: "from_date", calendar: lordHowe).date == first)
+        #expect(try DateParsing.parse(secondText, argument: "from_date", calendar: lordHowe).date == second)
+        let ordinary = try DateParsing.parse("2026-04-05T10:00", argument: "from_date", calendar: lordHowe).date
         #expect(DateParsing.roundTrip(ordinary, calendar: lordHowe) == "2026-04-05T10:00")
     }
 
-    @Test("A local time that the spring clock change skips moves to the next valid minute")
-    func springGapStaysOnTheSameDay() throws {
-        let moment = try parse("2026-03-29T02:30")
-        let parts = madrid.dateComponents([.month, .day, .hour], from: moment)
-        #expect(parts.month == 3 && parts.day == 29 && parts.hour == 3)
+    @Test("A local time that the spring clock change skips is refused, and its day is not")
+    func springGapIsRefused() throws {
+        #expect(throws: ToolError.badDate(argument: "from_date", value: "2026-03-29T02:30")) {
+            try parse("2026-03-29T02:30")
+        }
+        let day = try DateParsing.parse("2026-03-29", argument: "from_date", calendar: madrid)
+        // A day that loses an hour is 23 hours long, and to_date covers all of it.
+        #expect(day.end.timeIntervalSince(day.date) == 23 * 3600)
+    }
+
+    @Test("to_date is inclusive at the precision it was written in")
+    func toDateIsInclusive() throws {
+        let day = try DateParsing.parse("2026-08-12", argument: "to_date", calendar: madrid)
+        #expect(day.end == Fixtures.date(2026, 8, 13))
+        let minute = try DateParsing.parse("2026-08-12T09:00", argument: "to_date", calendar: madrid)
+        #expect(minute.end.timeIntervalSince(minute.date) == 60)
+        let second = try DateParsing.parse(
+            "2026-08-12T09:00:05", argument: "to_date", calendar: madrid)
+        #expect(second.end.timeIntervalSince(second.date) == 1)
+        let explicit = try DateParsing.parse(
+            "2026-08-12T09:00:00+02:00", argument: "to_date", calendar: madrid)
+        #expect(explicit.end.timeIntervalSince(explicit.date) == 1)
+
+        let range = try arguments(["from_date": .string("2026-08-12"), "to_date": .string("2026-08-12")])
+            .dateRange()
+        #expect(range.from == Fixtures.date(2026, 8, 12) && range.before == Fixtures.date(2026, 8, 13))
+        #expect(throws: ToolError.rangeInverted) {
+            try arguments(["from_date": .string("2026-08-12"), "to_date": .string("2026-08-11")])
+                .dateRange()
+        }
     }
 
     @Test("In the hour the clocks go back, a printed time says which of the two it was")
@@ -96,11 +121,10 @@ struct ArgumentAndDateTests {
         Arguments(values, calendar: madrid)
     }
 
-    @Test("A boolean argument is a boolean, or the strings true and false, or an error")
+    @Test("A boolean argument is a boolean or an error, never text that looks like one")
     func booleansAreStrict() throws {
         #expect(try arguments(["from_me": .bool(true)]).optionalBool("from_me") == true)
-        #expect(try arguments(["from_me": .string("TRUE")]).optionalBool("from_me") == true)
-        #expect(try arguments(["from_me": .string(" false ")]).optionalBool("from_me") == false)
+        #expect(try arguments(["from_me": .bool(false)]).optionalBool("from_me") == false)
         #expect(try arguments([:]).optionalBool("from_me") == nil)
         // JSON null means "not set". An empty string does not: it is a filter that got lost.
         #expect(try arguments(["from_me": .null]).optionalBool("from_me") == nil)
@@ -108,7 +132,8 @@ struct ArgumentAndDateTests {
         #expect(try arguments([:]).bool("starred_only") == false)
 
         for wrong: Value in [
-            .string("yes"), .string("1"), .string(""), .string("   "), .int(1), .double(0.5), .array([]),
+            .string("yes"), .string("1"), .string(""), .string("   "), .string("true"), .int(1),
+            .double(0.5), .array([]),
         ] {
             #expect(throws: ToolError.self, "\(wrong)") {
                 _ = try arguments(["from_me": wrong]).optionalBool("from_me")
@@ -150,8 +175,7 @@ struct ArgumentAndDateTests {
             #expect(text.contains(filter))
         }
 
-        // The string form of a real boolean still filters.
-        let (mine, mineError) = await run(["chat_id": .int(1), "from_me": .string("true")])
+        let (mine, mineError) = await run(["chat_id": .int(1), "from_me": .bool(true)])
         #expect(!mineError)
         #expect(mine.contains("mine") && !mine.contains("theirs"))
     }

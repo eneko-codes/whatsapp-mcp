@@ -32,7 +32,9 @@ public struct CallParticipant: Sendable, Equatable {
 }
 
 public struct CallQuery: Sendable, Equatable {
-    public var after: Date?
+    /// Inclusive lower bound.
+    public var from: Date?
+    /// Exclusive upper bound: the first instant `to_date` leaves out.
     public var before: Date?
     public var newestFirst = true
     public var limit = 50
@@ -53,8 +55,22 @@ public struct LocationSharing: Sendable, Equatable {
         public var jid: String?
         public var expires: Date?
     }
+    /// One page of the two lists read as one: the sessions you started, then the
+    /// recipient rows. `outgoingTotal` and `recipientTotal` count every row of each.
     public var outgoing: [Outgoing]
     public var recipients: [Recipient]
+    public var outgoingTotal: Int
+    public var recipientTotal: Int
+
+    public init(
+        outgoing: [Outgoing], recipients: [Recipient], outgoingTotal: Int? = nil,
+        recipientTotal: Int? = nil
+    ) {
+        self.outgoing = outgoing
+        self.recipients = recipients
+        self.outgoingTotal = outgoingTotal ?? outgoing.count
+        self.recipientTotal = recipientTotal ?? recipients.count
+    }
 }
 
 public struct Label: Sendable, Equatable {
@@ -114,17 +130,24 @@ public struct Channel: Sendable, Equatable {
 }
 
 /// One seam for everything outside the chat store.
+///
+/// Every listing pages at the source: it counts what matches and reads one page in an order
+/// with no ties, so the next page starts exactly where this one ended. `labels` and
+/// `lidLookup` return every match, because there are few, and the tool pages them.
 public protocol DomainReader: Sendable {
-    func calls(matching query: CallQuery) throws -> (calls: [CallEvent], source: SourceInfo)
-    func locationSharing(limit: Int) throws -> (sharing: LocationSharing, source: SourceInfo)
+    func calls(matching query: CallQuery) throws
+        -> (calls: [CallEvent], total: Int, source: SourceInfo)
+    func locationSharing(limit: Int, offset: Int) throws
+        -> (sharing: LocationSharing, source: SourceInfo)
     func labels() throws -> (labels: [Label], source: SourceInfo)
-    func labeledEntities(labelID: Int64, limit: Int) throws
-        -> (label: Label?, entities: [LabeledEntity], source: SourceInfo)
+    func labeledEntities(labelID: Int64, limit: Int, offset: Int) throws
+        -> (label: Label?, entities: [LabeledEntity], total: Int, source: SourceInfo)
     func addressBook(matching query: AddressBookQuery) throws
-        -> (entries: [AddressBookEntry], source: SourceInfo)
+        -> (entries: [AddressBookEntry], total: Int, source: SourceInfo)
     func lidLookup(_ value: String) throws
         -> (matches: [LIDMatch], sources: [SourceInfo], notes: [String])
-    func channels(name: String?, limit: Int) throws -> (channels: [Channel], source: SourceInfo)
+    func channels(name: String?, limit: Int, offset: Int) throws
+        -> (channels: [Channel], total: Int, source: SourceInfo)
 }
 
 // MARK: - Implementation over the live databases
@@ -162,7 +185,9 @@ public struct LiveDomainReader: DomainReader {
 
     // MARK: Calls
 
-    public func calls(matching query: CallQuery) throws -> (calls: [CallEvent], source: SourceInfo) {
+    public func calls(matching query: CallQuery) throws
+        -> (calls: [CallEvent], total: Int, source: SourceInfo)
+    {
         let (database, info) = try open(
             .callHistory,
             requires: [
@@ -178,6 +203,11 @@ public struct LiveDomainReader: DomainReader {
         var calls: [CallEvent] = []
         var aggregateIDs: [Int64?] = []
         let direction = query.newestFirst ? "DESC" : "ASC"
+        let range = [Self.bind(query.from), Self.bind(query.before)]
+        let total = try Self.count(
+            database,
+            "SELECT count(*) FROM ZWACDCALLEVENT c WHERE (?1 IS NULL OR c.ZDATE >= ?1) AND (?2 IS NULL OR c.ZDATE < ?2)",
+            range)
         try database.query(
             """
             SELECT c.Z_PK, c.ZDATE, c.ZDURATION, c.ZOUTCOME, c.ZGROUPJIDSTRING,
@@ -189,10 +219,7 @@ public struct LiveDomainReader: DomainReader {
             ORDER BY c.ZDATE \(direction), c.Z_PK \(direction)
             LIMIT ?3 OFFSET ?4
             """,
-            [
-                Self.bind(query.after), Self.bind(query.before), .int(Int64(query.limit)),
-                .int(Int64(query.offset)),
-            ]
+            range + [.int(Int64(query.limit)), .int(Int64(query.offset))]
         ) { row in
             calls.append(
                 CallEvent(
@@ -220,28 +247,41 @@ public struct LiveDomainReader: DomainReader {
                 }
             }
         }
-        return (calls, info)
+        return (calls, total, info)
     }
 
     // MARK: Live location
 
-    public func locationSharing(limit: Int) throws -> (sharing: LocationSharing, source: SourceInfo) {
+    /// The two tables read as one list, the sessions you started first: `offset` and
+    /// `limit` count across both, so one page can end in the first and the next start in
+    /// the second.
+    public func locationSharing(limit: Int, offset: Int) throws
+        -> (sharing: LocationSharing, source: SourceInfo)
+    {
         let (database, info) = try open(
             .location,
             requires: [
                 "ZWALOCATIONSENDER": [
-                    "ZCHAT", "ZPARTICIPANT", "ZTIMESTAMP", "ZENDDATE", "ZSEQUENCENUMBER",
+                    "Z_PK", "ZCHAT", "ZPARTICIPANT", "ZTIMESTAMP", "ZENDDATE", "ZSEQUENCENUMBER",
                 ],
-                "ZWAFINALLOCATIONRECIPIENT": ["ZCHATJID", "ZJID", "ZEXPIRATION"],
+                "ZWAFINALLOCATIONRECIPIENT": ["Z_PK", "ZCHATJID", "ZJID", "ZEXPIRATION"],
             ])
-        var sharing = LocationSharing(outgoing: [], recipients: [])
+        let outgoingTotal = try Self.count(database, "SELECT count(*) FROM ZWALOCATIONSENDER")
+        let recipientTotal = try Self.count(
+            database, "SELECT count(*) FROM ZWAFINALLOCATIONRECIPIENT")
+        var sharing = LocationSharing(
+            outgoing: [], recipients: [], outgoingTotal: outgoingTotal,
+            recipientTotal: recipientTotal)
+        let outgoingLimit = max(0, min(limit, outgoingTotal - offset))
+        let recipientOffset = max(0, offset - outgoingTotal)
+        let recipientLimit = limit - outgoingLimit
         // ZLOCATIONMESSAGE, a protobuf blob of coordinates, is deliberately not read: it is
         // not decoded here, and a blob in the answer would be a number of bytes.
         try database.query(
             """
             SELECT ZCHAT, ZPARTICIPANT, ZTIMESTAMP, ZENDDATE, ZSEQUENCENUMBER
-            FROM ZWALOCATIONSENDER ORDER BY ZTIMESTAMP DESC LIMIT ?
-            """, [.int(Int64(limit))]
+            FROM ZWALOCATIONSENDER ORDER BY ZTIMESTAMP DESC, Z_PK DESC LIMIT ? OFFSET ?
+            """, [.int(Int64(outgoingLimit)), .int(Int64(min(offset, outgoingTotal)))]
         ) { row in
             sharing.outgoing.append(
                 .init(
@@ -249,8 +289,11 @@ public struct LiveDomainReader: DomainReader {
                     started: row.date(2), ends: row.date(3), sequence: row.optionalInt(4)))
         }
         try database.query(
-            "SELECT ZCHATJID, ZJID, ZEXPIRATION FROM ZWAFINALLOCATIONRECIPIENT ORDER BY ZEXPIRATION DESC LIMIT ?",
-            [.int(Int64(limit))]
+            """
+            SELECT ZCHATJID, ZJID, ZEXPIRATION FROM ZWAFINALLOCATIONRECIPIENT
+            ORDER BY ZEXPIRATION DESC, Z_PK DESC LIMIT ? OFFSET ?
+            """,
+            [.int(Int64(recipientLimit)), .int(Int64(recipientOffset))]
         ) { row in
             sharing.recipients.append(
                 .init(
@@ -281,7 +324,7 @@ public struct LiveDomainReader: DomainReader {
             """
             SELECT l.ZLABELID, l.ZNAME, l.ZCOLORID, l.ZISACTIVE, l.ZPREDEFINEDID, l.ZORDERINDEX,
                    (SELECT count(*) FROM Z_1PROXIES p WHERE p.Z_1LABELS = l.Z_PK)
-            FROM ZWASMBLABEL l ORDER BY l.ZORDERINDEX, l.ZLABELID
+            FROM ZWASMBLABEL l ORDER BY l.ZORDERINDEX, l.ZLABELID, l.Z_PK
             """
         ) { row in
             labels.append(
@@ -293,19 +336,24 @@ public struct LiveDomainReader: DomainReader {
         return labels
     }
 
-    public func labeledEntities(labelID: Int64, limit: Int) throws
-        -> (label: Label?, entities: [LabeledEntity], source: SourceInfo)
+    public func labeledEntities(labelID: Int64, limit: Int, offset: Int) throws
+        -> (label: Label?, entities: [LabeledEntity], total: Int, source: SourceInfo)
     {
         let (database, info) = try open(.labels, requires: Self.labelTables)
+        let joined = """
+            FROM ZWASMBLABEL l
+            JOIN Z_1PROXIES p ON p.Z_1LABELS = l.Z_PK
+            JOIN ZWASMBLABELEDENTITYPROXY e ON e.Z_PK = p.Z_2PROXIES
+            WHERE l.ZLABELID = ?
+            """
+        let total = try Self.count(database, "SELECT count(*) \(joined)", [.int(labelID)])
         var entities: [LabeledEntity] = []
         try database.query(
             """
             SELECT e.ZENTITYTYPE, e.ZCONTACTJID, e.ZENTITYKEY, e.ZDATE
-            FROM ZWASMBLABEL l
-            JOIN Z_1PROXIES p ON p.Z_1LABELS = l.Z_PK
-            JOIN ZWASMBLABELEDENTITYPROXY e ON e.Z_PK = p.Z_2PROXIES
-            WHERE l.ZLABELID = ? ORDER BY e.ZDATE DESC LIMIT ?
-            """, [.int(labelID), .int(Int64(limit))]
+            \(joined)
+            ORDER BY e.ZDATE DESC, e.Z_PK DESC, l.Z_PK LIMIT ? OFFSET ?
+            """, [.int(labelID), .int(Int64(limit)), .int(Int64(offset))]
         ) { row in
             entities.append(
                 LabeledEntity(
@@ -313,13 +361,13 @@ public struct LiveDomainReader: DomainReader {
                     entityKey: Self.nonEmpty(row.text(2)), date: row.date(3)))
         }
         let label = try labelRows(database).first { $0.id == labelID }
-        return (label, entities, info)
+        return (label, entities, total, info)
     }
 
     // MARK: Address book
 
     public func addressBook(matching query: AddressBookQuery) throws
-        -> (entries: [AddressBookEntry], source: SourceInfo)
+        -> (entries: [AddressBookEntry], total: Int, source: SourceInfo)
     {
         let (database, info) = try open(
             .contacts,
@@ -330,18 +378,23 @@ public struct LiveDomainReader: DomainReader {
                     "ZLASTUPDATED",
                 ]
             ])
+        let matching = """
+            FROM ZWAADDRESSBOOKCONTACT
+            WHERE ?1 IS NULL OR wa_contains(coalesce(ZFULLNAME, '') || ' ' || coalesce(ZGIVENNAME, '')
+                || ' ' || coalesce(ZLASTNAME, '') || ' ' || coalesce(ZBUSINESSNAME, '')
+                || ' ' || coalesce(ZPHONENUMBER, ''), ?1)
+            """
+        let name: SQLiteBinding = query.name.map { .text($0) } ?? .null
+        let total = try Self.count(database, "SELECT count(*) \(matching)", [name])
         var entries: [AddressBookEntry] = []
         try database.query(
             """
             SELECT Z_PK, ZFULLNAME, ZGIVENNAME, ZLASTNAME, ZBUSINESSNAME, ZPHONENUMBER, ZLID,
                    ZWHATSAPPID, ZUSERNAME, ZABOUTTEXT, ZLASTUPDATED
-            FROM ZWAADDRESSBOOKCONTACT
-            WHERE ?1 IS NULL OR wa_contains(coalesce(ZFULLNAME, '') || ' ' || coalesce(ZGIVENNAME, '')
-                || ' ' || coalesce(ZLASTNAME, '') || ' ' || coalesce(ZBUSINESSNAME, '')
-                || ' ' || coalesce(ZPHONENUMBER, ''), ?1)
+            \(matching)
             ORDER BY coalesce(ZFULLNAME, ZBUSINESSNAME, ''), Z_PK LIMIT ?2 OFFSET ?3
             """,
-            [query.name.map { .text($0) } ?? .null, .int(Int64(query.limit)), .int(Int64(query.offset))]
+            [name, .int(Int64(query.limit)), .int(Int64(query.offset))]
         ) { row in
             entries.append(
                 AddressBookEntry(
@@ -352,7 +405,7 @@ public struct LiveDomainReader: DomainReader {
                     username: Self.nonEmpty(row.text(8)), about: Self.nonEmpty(row.text(9)),
                     lastUpdated: row.date(10)))
         }
-        return (entries, info)
+        return (entries, total, info)
     }
 
     // MARK: LID
@@ -381,7 +434,8 @@ public struct LiveDomainReader: DomainReader {
             """
             SELECT ZLID, ZPHONENUMBER FROM ZWAPHONENUMBERLIDPAIR
             WHERE ZLID = ?1 OR substr(ZLID, 1, length(?1) + 1) = ?1 || '@'
-               OR ZPHONENUMBER = ?1 OR substr(ZPHONENUMBER, 1, length(?1) + 1) = ?1 || '@' LIMIT 20
+               OR ZPHONENUMBER = ?1 OR substr(ZPHONENUMBER, 1, length(?1) + 1) = ?1 || '@'
+            ORDER BY ZLID, ZPHONENUMBER
             """, [.text(bare)]
         ) { row in
             matches.append(
@@ -393,7 +447,8 @@ public struct LiveDomainReader: DomainReader {
         try lidDatabase.query(
             """
             SELECT ZLID, ZDISPLAYNAME, ZUSERNAME FROM ZWALIDPROPERTIES
-            WHERE ZLID = ?1 OR substr(ZLID, 1, length(?1) + 1) = ?1 || '@' LIMIT 20
+            WHERE ZLID = ?1 OR substr(ZLID, 1, length(?1) + 1) = ?1 || '@'
+            ORDER BY ZLID, ZDISPLAYNAME, ZUSERNAME
             """, [.text(bare)]
         ) { row in
             matches.append(
@@ -420,7 +475,8 @@ public struct LiveDomainReader: DomainReader {
                 SELECT contact_lid, contact_pn, contact_username, contact_push_name
                 FROM contact_metadata
                 WHERE contact_lid = ?1 OR substr(contact_lid, 1, length(?1) + 1) = ?1 || '@'
-                   OR contact_pn = ?1 OR substr(contact_pn, 1, length(?1) + 1) = ?1 || '@' LIMIT 20
+                   OR contact_pn = ?1 OR substr(contact_pn, 1, length(?1) + 1) = ?1 || '@'
+                ORDER BY contact_lid, contact_pn, contact_username, contact_push_name
                 """, [.text(bare)]
             ) { row in
                 matches.append(
@@ -440,8 +496,8 @@ public struct LiveDomainReader: DomainReader {
 
     // MARK: Channels
 
-    public func channels(name: String?, limit: Int) throws
-        -> (channels: [Channel], source: SourceInfo)
+    public func channels(name: String?, limit: Int, offset: Int) throws
+        -> (channels: [Channel], total: Int, source: SourceInfo)
     {
         let (database, info) = try open(
             .extendedChat,
@@ -451,13 +507,18 @@ public struct LiveDomainReader: DomainReader {
                     "added_by_push_name",
                 ]
             ])
+        let filter: SQLiteBinding = name.map { .text($0) } ?? .null
+        let total = try Self.count(
+            database,
+            "SELECT count(*) FROM channel_metadata WHERE ?1 IS NULL OR wa_contains(channel_name, ?1)",
+            [filter])
         var channels: [Channel] = []
         try database.query(
             """
             SELECT channel_jid, channel_name, added_by_lid, added_by_push_name
             FROM channel_metadata WHERE ?1 IS NULL OR wa_contains(channel_name, ?1)
-            ORDER BY channel_name, channel_metadata_id LIMIT ?2
-            """, [name.map { .text($0) } ?? .null, .int(Int64(limit))]
+            ORDER BY channel_name, channel_metadata_id LIMIT ?2 OFFSET ?3
+            """, [filter, .int(Int64(limit)), .int(Int64(offset))]
         ) { row in
             channels.append(
                 Channel(
@@ -465,10 +526,18 @@ public struct LiveDomainReader: DomainReader {
                     addedByLID: Self.nonEmpty(row.text(2)),
                     addedByName: Self.nonEmpty(row.text(3))))
         }
-        return (channels, info)
+        return (channels, total, info)
     }
 
     // MARK: Helpers
+
+    private static func count(
+        _ database: ReadOnlyDatabase, _ sql: String, _ bindings: [SQLiteBinding] = []
+    ) throws -> Int {
+        var total = 0
+        try database.query(sql, bindings) { row in total = Int(row.int(0)) }
+        return total
+    }
 
     private static func bind(_ date: Date?) -> SQLiteBinding {
         date.map { .double($0.timeIntervalSinceReferenceDate) } ?? .null

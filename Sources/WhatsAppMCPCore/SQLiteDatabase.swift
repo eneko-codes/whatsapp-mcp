@@ -218,7 +218,9 @@ final class ReadOnlyDatabase {
             case .notASingleSelect:
                 "only one SELECT (or WITH … SELECT) statement is accepted, with no leading comment"
             case .notReadOnly: "the statement would change the database"
-            case .timedOut: "the statement ran past its time limit and was stopped"
+            case .timedOut:
+                "the statement ran past its time limit and was stopped; narrow it with a WHERE "
+                    + "clause on an indexed column, or a smaller offset, since skipped rows are read too"
             case .blocked:
                 "the statement reads key material, raw protocol queues or a table the database "
                     + "does not declare, which no tool here returns"
@@ -230,7 +232,17 @@ final class ReadOnlyDatabase {
     struct SelectedRows: Equatable {
         var columns: [String]
         var rows: [[String]]
-        var truncated: Bool
+        /// Another row follows the last one returned: the row limit or the size cap stopped
+        /// the read, not the end of the statement's rows.
+        var moreRowsExist: Bool
+        /// At least one value was shortened to `cellWidth`.
+        var clippedCells: Bool = false
+        /// The width values were shortened to: the asked width, or less when a statement
+        /// names so many columns that one row would not fit otherwise.
+        var cellWidth: Int = 0
+        /// Rows stepped over for `offset`. When the rows ended inside them, this is how
+        /// many there were.
+        var rowsSkipped: Int = 0
     }
 
     /// Runs caller-supplied SQL, which is the one place in this project where a string from
@@ -246,9 +258,13 @@ final class ReadOnlyDatabase {
     ///
     /// A progress handler enforces the time limit: a cross join over WhatsApp's message
     /// table would otherwise hold the process for as long as it liked.
+    ///
+    /// `offset` rows are stepped over before any is kept, so a second call continues where
+    /// the first stopped. The total is not counted: that would run the statement twice.
     func selectRows(
-        _ sql: String, maxRows: Int, maxCellLength: Int = 2000,
-        maxTotalCharacters: Int = 200_000, timeLimit: TimeInterval = 5
+        _ sql: String, offset: Int = 0, maxRows: Int,
+        maxCellLength: Int = Configuration.cellWidth,
+        maxTotalCharacters: Int = ToolStandard.longestResult / 2, timeLimit: TimeInterval = 5
     ) throws -> SelectedRows {
         let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw SelectRefusal.empty }
@@ -330,28 +346,35 @@ final class ReadOnlyDatabase {
             let columnCount = sqlite3_column_count(statement)
             var result = SelectedRows(
                 columns: (0..<columnCount).map { String(cString: sqlite3_column_name(statement, $0)) },
-                rows: [], truncated: false)
+                rows: [], moreRowsExist: false)
 
             var totalCharacters = 0
             // Even one row of very wide cells must fit the cap, so shrink the cells.
             let cellLength = max(20, min(maxCellLength, maxTotalCharacters / max(1, Int(columnCount))))
+            result.cellWidth = cellLength
             while true {
                 switch sqlite3_step(statement) {
                 case SQLITE_ROW:
+                    if result.rowsSkipped < offset {
+                        result.rowsSkipped += 1
+                        continue
+                    }
                     if result.rows.count == maxRows {
-                        result.truncated = true
+                        result.moreRowsExist = true
                         return result
                     }
+                    var clipped = false
                     let row = (0..<columnCount).map {
-                        Self.render(statement, $0, maxLength: cellLength)
+                        Self.render(statement, $0, maxLength: cellLength, clipped: &clipped)
                     }
                     // Rows and cells are capped, but a statement can still name thousands
                     // of columns; this bounds the answer as a whole.
                     totalCharacters += row.reduce(0) { $0 + $1.count }
                     if totalCharacters > maxTotalCharacters, !result.rows.isEmpty {
-                        result.truncated = true
+                        result.moreRowsExist = true
                         return result
                     }
+                    result.clippedCells = result.clippedCells || clipped
                     result.rows.append(row)
                 case SQLITE_DONE:
                     return result
@@ -367,7 +390,9 @@ final class ReadOnlyDatabase {
 
     /// Text as text, numbers as numbers, and a blob as its size: bytes of a WhatsApp
     /// protobuf are never going to be useful pasted into a chat window.
-    private static func render(_ statement: OpaquePointer, _ index: Int32, maxLength: Int) -> String {
+    private static func render(
+        _ statement: OpaquePointer, _ index: Int32, maxLength: Int, clipped: inout Bool
+    ) -> String {
         switch sqlite3_column_type(statement, index) {
         case SQLITE_NULL:
             return "NULL"
@@ -380,7 +405,11 @@ final class ReadOnlyDatabase {
         default:
             guard let pointer = sqlite3_column_text(statement, index) else { return "NULL" }
             let text = String(cString: pointer)
-            return text.count > maxLength ? String(text.prefix(maxLength)) + "…" : text
+            guard text.count > maxLength else { return text }
+            clipped = true
+            // The ellipsis counts towards the width, so a clipped value is exactly as wide
+            // as the notice says.
+            return String(text.prefix(maxLength - 1)) + "…"
         }
     }
 

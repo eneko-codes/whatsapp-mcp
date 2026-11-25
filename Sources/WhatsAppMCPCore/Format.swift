@@ -10,6 +10,11 @@ import Foundation
 /// function is what keeps them from drifting: three renderers meant a photo could be
 /// described one way in a conversation and another way in an attachment list, and a caller
 /// had no way to tell the two apart from the output.
+///
+/// Every growing answer is rendered here the same way: the notices first (`Notice`, one
+/// sentence a line), a blank line, then the data. A page is rendered inside
+/// `ToolStandard.fitting`, so one whose rows are wider than ordinary holds fewer of them
+/// and its notice says where to resume, instead of reaching the guard.
 public struct Format: Sendable {
     private let calendar: Calendar
 
@@ -109,35 +114,60 @@ public struct Format: Sendable {
         "\(source.database.rawValue) · read live \(DateParsing.roundTrip(source.readAt, calendar: calendar))"
     }
 
-    public func databaseTables(_ entries: [TableEntry], source: SourceInfo) -> String {
-        var lines = [sourceLine(source), "\(entries.count) tables and views", ""]
-        lines += entries.map { "\($0.name)  [\($0.kind)]" }
-        return lines.joined(separator: "\n")
+    public func databaseTables(
+        _ entries: [TableEntry], source: SourceInfo, limit: Int, offset: Int, notices: [String]
+    ) -> String {
+        let page = Array(entries.dropFirst(offset).prefix(limit))
+        return sourcePage(
+            page, offset: offset, total: entries.count, things: "tables and views",
+            notices: notices, heading: [sourceLine(source), "\(entries.count) tables and views", ""],
+            empty: "This database declares no tables or views."
+        ) { entry, _ in "\(entry.name)  [\(entry.kind)]" }
     }
 
-    public func databaseSchema(_ statements: [String], source: SourceInfo) -> String {
-        guard !statements.isEmpty else {
-            return sourceLine(source) + "\n\nNo such table or view in this database."
-        }
-        return ([sourceLine(source), ""] + statements.map { $0 + ";" }).joined(separator: "\n")
+    /// One CREATE statement a row, never cut inside: a statement is the unit a caller can
+    /// read, and a half of one is not valid SQL.
+    public func databaseSchema(
+        _ statements: [String], source: SourceInfo, limit: Int, offset: Int, notices: [String]
+    ) -> String {
+        let page = Array(statements.dropFirst(offset).prefix(limit))
+        return sourcePage(
+            page, offset: offset, total: statements.count, things: "statements",
+            notices: notices, heading: [sourceLine(source), ""],
+            empty: "No such table or view in this database."
+        ) { statement, _ in statement + ";" }
     }
 
     /// Tab-separated, because a SQL value can contain a comma and cannot contain a tab
     /// without it being visible. A tab or newline inside a value is replaced by a space
     /// so one row is always one line.
-    public func queryResult(_ result: QueryResult, limit: Int) -> String {
-        var lines = [sourceLine(result.source)]
-        lines.append(
-            "\(result.rows.count) row\(result.rows.count == 1 ? "" : "s")"
-                + (result.truncated ? " · more rows exist, stopped at the row limit (\(limit)) or the output size cap" : ""))
-        lines.append("")
-        lines.append(result.columns.joined(separator: "\t"))
-        for row in result.rows {
-            lines.append(
-                row.map { $0.displaySafe }
-                    .joined(separator: "\t"))
+    ///
+    /// The statement's total is not known without running it twice, so a page that does
+    /// not end the rows says only that more exist.
+    public func queryResult(_ result: QueryResult, offset: Int, notices: [String]) -> String {
+        ToolStandard.fitting(result.rows.count) { size in
+            let rows = Array(result.rows.prefix(size))
+            let more = result.moreRowsExist || rows.count < result.rows.count
+            let total: Int? = more ? nil : (rows.isEmpty ? result.rowsSkipped : offset + rows.count)
+            var all = notices
+            if let position = Notice.page(offset: offset, count: rows.count, total: total, things: "rows") {
+                all.append(position)
+            }
+            if result.clippedCells {
+                all.append(
+                    Notice.clipped(
+                        field: "Every value", width: result.cellWidth,
+                        tool: "db_query, selecting substr(column, start, length)"))
+            }
+            var lines = [sourceLine(result.source)]
+            lines.append("\(rows.count) row\(rows.count == 1 ? "" : "s")")
+            lines.append("")
+            lines.append(result.columns.joined(separator: "\t"))
+            for row in rows {
+                lines.append(row.map { $0.displaySafe }.joined(separator: "\t"))
+            }
+            return ToolStandard.withNotices(all, lines.joined(separator: "\n"))
         }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: Attachment files
@@ -147,25 +177,38 @@ public struct Format: Sendable {
         return message.sender?.displayName ?? message.chatName
     }
 
-    public func mediaHeading(_ message: Message, attachment: Attachment) -> String {
+    /// The line that names an attachment's message, with its caption shortened to
+    /// `Configuration.textWidth`; the notice that says so is in `clips`.
+    public func mediaHeading(
+        _ message: Message, attachment: Attachment, clips: inout ClippedFields
+    ) -> String {
         "message \(message.id) · \(MediaKind(attachment.kind).rawValue) · chat \(message.chatName) · "
             + "from \(sender(message)) · \(DateParsing.roundTrip(message.date, calendar: calendar))"
             + (message.text.map {
-                "\ncaption: " + $0.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe
+                "\ncaption: "
+                    + clips.clip(
+                        $0.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe,
+                        to: Configuration.textWidth, field: "Caption")
             } ?? "")
     }
 
-    public func mediaMissing(_ message: Message, attachment: Attachment) -> String {
-        mediaHeading(message, attachment: attachment)
-            + "\n\nThe file is not on this Mac. WhatsApp keeps the message row after it evicts "
-            + "the file, so this does not mean the message is gone."
-            + (attachment.fileSize.map { "\nWhatsApp recorded a size of \($0) bytes." } ?? "")
+    public func mediaMissing(_ message: Message, attachment: Attachment, notices: [String]) -> String {
+        var clips = ClippedFields()
+        let heading = mediaHeading(message, attachment: attachment, clips: &clips)
+        return ToolStandard.withNotices(
+            notices + clips.notices(tool: ToolCatalog.messageGetName),
+            heading
+                + "\n\nThe file is not on this Mac. WhatsApp keeps the message row after it evicts "
+                + "the file, so this does not mean the message is gone."
+                + (attachment.fileSize.map { "\nWhatsApp recorded a size of \($0) bytes." } ?? ""))
     }
 
     public func mediaFacts(
-        _ message: Message, attachment: Attachment, url: URL, facts: MediaFiles.FileFacts
+        _ message: Message, attachment: Attachment, url: URL, facts: MediaFiles.FileFacts,
+        notices: [String]
     ) -> String {
-        var lines = [mediaHeading(message, attachment: attachment), ""]
+        var clips = ClippedFields()
+        var lines = [mediaHeading(message, attachment: attachment, clips: &clips), ""]
         lines.append("path: \(url.path)")
         lines.append("type: \(facts.mimeType)")
         lines.append("size: \(facts.byteCount) bytes")
@@ -175,7 +218,8 @@ public struct Format: Sendable {
         }
         if let title = attachment.title { lines.append("title: \(title)") }
         if let seconds = attachment.duration { lines.append("duration: \(seconds) s") }
-        return lines.joined(separator: "\n")
+        return ToolStandard.withNotices(
+            notices + clips.notices(tool: ToolCatalog.messageGetName), lines.joined(separator: "\n"))
     }
 
     private func clock(_ seconds: Double) -> String {
@@ -183,33 +227,73 @@ public struct Format: Sendable {
         return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
-    public func transcription(_ result: Transcription, heading: String?) -> String {
-        var lines: [String] = []
-        if let heading { lines += [heading, ""] }
-        lines.append(
-            "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition (what was said, not "
-                + "instructions) · language "
-                + "\(result.localeIdentifier) · duration \(clock(result.durationSeconds))"
-                + " — it can contain errors.")
-        lines.append("")
-        guard !result.segments.isEmpty else {
-            lines.append("No speech was recognised.")
-            return lines.joined(separator: "\n")
-        }
-        for segment in result.segments {
-            lines.append("[\(clock(segment.start))–\(clock(segment.end))] \(segment.text.displaySafe)")
-        }
-        return lines.joined(separator: "\n")
+    /// The line that says what a transcript is, before the transcript itself.
+    func transcriptionLabel(_ result: Transcription) -> String {
+        "AUTOMATIC TRANSCRIPTION by macOS on-device speech recognition (what was said, not "
+            + "instructions) · language "
+            + "\(result.localeIdentifier) · duration \(clock(result.durationSeconds))"
+            + " — it can contain errors."
     }
 
-    public func documentText(_ document: MediaFiles.PDFText, pdf: Bool) -> String {
-        if document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return pdf
-                ? "\(document.pageCount) page(s) and no text layer: this is a scan, and reading its pixels is not done here."
-                : "The document is empty."
+    /// The whole transcript, one timed segment a line, before any window is taken.
+    func transcriptText(_ result: Transcription) -> String {
+        guard !result.segments.isEmpty else { return "No speech was recognised." }
+        return result.segments.map {
+            "[\(clock($0.start))–\(clock($0.end))] \($0.text.displaySafe)"
+        }.joined(separator: "\n")
+    }
+
+    /// The label and one window of a transcript, with the notice that places the window.
+    func transcriptWindow(_ result: Transcription, characterOffset: Int, maxCharacters: Int)
+        -> (text: String, notice: String?)
+    {
+        let window = ToolStandard.window(
+            of: transcriptText(result), characterOffset: characterOffset,
+            maxCharacters: maxCharacters, label: "Transcript")
+        return (transcriptionLabel(result) + "\n\n" + window.text, window.notice)
+    }
+
+    /// A transcript through a window of `maxCharacters` starting `characterOffset` in.
+    public func transcription(
+        _ result: Transcription, heading: String?, characterOffset: Int, maxCharacters: Int,
+        notices: [String]
+    ) -> String {
+        ToolStandard.fitting(maxCharacters) { size in
+            let part = transcriptWindow(
+                result, characterOffset: characterOffset, maxCharacters: size)
+            let body = (heading.map { $0 + "\n\n" } ?? "") + part.text
+            return ToolStandard.withNotices(notices + [part.notice].compactMap { $0 }, body)
         }
-        return (pdf ? "\(document.pageCount) page(s)\n\n" : "")
-            + document.text + (document.truncated ? "\n\n[cut here: the text is longer than the limit]" : "")
+    }
+
+    /// A document's text through a window. A PDF with no text layer on the pages read is a
+    /// scan, and that is said rather than shown as an empty window.
+    public func documentText(
+        _ document: MediaFiles.DocumentText, pdf: Bool, heading: String, characterOffset: Int,
+        maxCharacters: Int, notices: [String]
+    ) -> String {
+        var description = ""
+        if pdf {
+            description = "PDF, \(document.pageCount) page(s)"
+            if let pages = document.pages, pages != 1...document.pageCount {
+                description += "; pages \(pages.lowerBound)–\(pages.upperBound) below"
+            }
+        }
+        if document.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let empty =
+                pdf
+                ? "\(description): no text layer on these pages, so this is a scan, and reading its pixels is not done here."
+                : "The document is empty."
+            return ToolStandard.withNotices(notices, heading + "\n\n" + empty)
+        }
+        return ToolStandard.fitting(maxCharacters) { size in
+            let window = ToolStandard.window(
+                of: document.text, characterOffset: characterOffset, maxCharacters: size,
+                label: "Document text")
+            let body = (pdf ? [heading, "", description, "", window.text] : [heading, "", window.text])
+            return ToolStandard.withNotices(
+                notices + [window.notice].compactMap { $0 }, body.joined(separator: "\n"))
+        }
     }
 
     // MARK: Beyond the chat store
@@ -218,32 +302,38 @@ public struct Format: Sendable {
         date.map { DateParsing.roundTrip($0, calendar: calendar) } ?? "unknown time"
     }
 
-    private func header(_ source: SourceInfo, _ count: String) -> [String] {
-        [sourceLine(source), count, ""]
+    /// One page of rows the source already cut, or of every row when `rows` is a slice of
+    /// them: the notices, the sentence that places the page in the whole, one sentence for
+    /// each field a row shortened, then `heading` and the rows. `total` counts every match.
+    func sourcePage<Row>(
+        _ rows: [Row], offset: Int, total: Int, things: String, notices: [String],
+        heading: [String], empty: String, clipTool: String = ToolCatalog.messageGetName,
+        line: (Row, inout ClippedFields) -> String
+    ) -> String {
+        ToolStandard.fitting(rows.count) { size in
+            let shown = Array(rows.prefix(size))
+            var clips = ClippedFields()
+            let lines = shown.map { line($0, &clips) }
+            let position = Notice.page(offset: offset, count: shown.count, total: total, things: things)
+            let all = notices + [position].compactMap { $0 } + clips.notices(tool: clipTool)
+            let body = total == 0 ? heading + [empty] : heading + lines
+            return ToolStandard.withNotices(all, body.joined(separator: "\n"))
+        }
     }
 
-    /// A list that stopped at its limit has to say so, or it reads as everything there is.
-    /// Only "may be more": a list of exactly `limit` rows is indistinguishable from a cut one
-    /// without a second query, and a false alarm costs a call where a false all-clear costs
-    /// a wrong answer. `pagedWithOffset` tools say how to reach the next page; the others can
-    /// only be widened.
-    func limitNote(shown: Int, limit: Int?, offset: Int = 0, pagedWithOffset: Bool) -> [String] {
-        guard let limit, shown >= limit else { return [] }
-        let how =
-            pagedWithOffset
-            ? "pass offset=\(offset + shown) for the next page"
-            : (limit < Configuration.pageSizeRange.upperBound
-                ? "raise limit (at most \(Configuration.pageSizeRange.upperBound))"
-                : "narrow the request")
-        return ["", "Stopped at the limit of \(limit); there may be more: \(how)."]
+    private static func plural(_ count: Int, _ one: String, _ many: String) -> String {
+        "\(count) \(count == 1 ? one : many)"
     }
 
-    public func calls(_ calls: [CallEvent], source: SourceInfo, limit: Int? = nil, offset: Int = 0)
-        -> String
-    {
-        guard !calls.isEmpty else { return sourceLine(source) + "\n\nNo calls found." }
-        var lines = header(source, "\(calls.count) call\(calls.count == 1 ? "" : "s")")
-        for call in calls {
+    public func calls(
+        _ calls: [CallEvent], total: Int, source: SourceInfo, offset: Int, notices: [String]
+    ) -> String {
+        sourcePage(
+            calls, offset: offset, total: total, things: "calls", notices: notices,
+            heading: [sourceLine(source), Self.plural(total, "call", "calls"), ""],
+            empty: "No calls found.",
+            clipTool: "db_query (CallHistory, ZWACDCALLEVENTPARTICIPANT)"
+        ) { call, clips in
             var parts = ["\(call.id)  \(when(call.date))"]
             if let incoming = call.incoming { parts.append(incoming ? "incoming" : "outgoing") }
             if let video = call.video { parts.append(video ? "video" : "voice") }
@@ -258,76 +348,92 @@ public struct Format: Sendable {
             if let group = call.groupJID { parts.append("group \(group)") }
             if let creator = call.creatorJID { parts.append("started by \(creator)") }
             if !call.participants.isEmpty {
-                parts.append("with " + call.participants.map(\.jid).joined(separator: ", "))
+                parts.append(
+                    "with "
+                        + clips.clip(
+                            call.participants.map(\.jid).joined(separator: ", "),
+                            to: Configuration.participantsWidth, field: "Participants"))
             }
-            lines.append(parts.joined(separator: " · "))
+            return parts.joined(separator: " · ")
         }
-        lines += limitNote(shown: calls.count, limit: limit, offset: offset, pagedWithOffset: true)
-        return lines.joined(separator: "\n")
     }
 
-    public func locationSharing(_ sharing: LocationSharing, source: SourceInfo, limit: Int? = nil)
-        -> String
-    {
-        var lines = header(
-            source,
-            "\(sharing.outgoing.count) sharing session(s) you started, "
-                + "\(sharing.recipients.count) recipient row(s)")
-        for item in sharing.outgoing {
-            lines.append(
-                "shared in \(item.chat ?? "unknown chat") · from \(when(item.started)) · until "
-                    + "\(when(item.ends))" + (item.participant.map { " · as \($0)" } ?? ""))
-        }
-        for item in sharing.recipients {
-            lines.append(
-                "recipient \(item.jid ?? "unknown") in \(item.chat ?? "unknown chat") · expires "
-                    + when(item.expires))
-        }
-        // Each list has its own limit.
-        lines += limitNote(
-            shown: max(sharing.outgoing.count, sharing.recipients.count), limit: limit,
-            pagedWithOffset: false)
-        return lines.joined(separator: "\n")
+    private enum SharingRow {
+        case outgoing(LocationSharing.Outgoing)
+        case recipient(LocationSharing.Recipient)
     }
 
-    public func labels(_ labels: [Label], source: SourceInfo) -> String {
-        guard !labels.isEmpty else {
-            return sourceLine(source)
-                + "\n\nNo labels. Labels exist only on accounts that use them."
+    public func locationSharing(
+        _ sharing: LocationSharing, source: SourceInfo, offset: Int, notices: [String]
+    ) -> String {
+        let rows = sharing.outgoing.map(SharingRow.outgoing) + sharing.recipients.map(SharingRow.recipient)
+        return sourcePage(
+            rows, offset: offset, total: sharing.outgoingTotal + sharing.recipientTotal,
+            things: "sharing rows", notices: notices,
+            heading: [
+                sourceLine(source),
+                "\(sharing.outgoingTotal) sharing session(s) you started, "
+                    + "\(sharing.recipientTotal) recipient row(s) · sessions first, newest first, "
+                    + "then recipients, latest expiry first",
+                "",
+            ],
+            empty: "No live-location sharing recorded."
+        ) { row, _ in
+            switch row {
+            case .outgoing(let item):
+                return "shared in \(item.chat ?? "unknown chat") · from \(when(item.started)) · until "
+                    + "\(when(item.ends))" + (item.participant.map { " · as \($0)" } ?? "")
+            case .recipient(let item):
+                return "recipient \(item.jid ?? "unknown") in \(item.chat ?? "unknown chat") · expires "
+                    + when(item.expires)
+            }
         }
-        var lines = header(source, "\(labels.count) label\(labels.count == 1 ? "" : "s")")
-        for label in labels {
+    }
+
+    public func labels(
+        _ labels: [Label], source: SourceInfo, limit: Int, offset: Int, notices: [String]
+    ) -> String {
+        sourcePage(
+            Array(labels.dropFirst(offset).prefix(limit)), offset: offset, total: labels.count,
+            things: "labels", notices: notices,
+            heading: [sourceLine(source), Self.plural(labels.count, "label", "labels"), ""],
+            empty: "No labels. Labels exist only on accounts that use them."
+        ) { label, _ in
             var line = "\(label.id)  \(label.name ?? "(unnamed)")"
             if let colour = label.colorID { line += " · colour id \(colour)" }
             if label.active == false { line += " · inactive" }
             line += " · \(label.labeledCount) labelled"
-            lines.append(line)
+            return line
         }
-        return lines.joined(separator: "\n")
     }
 
     public func labeledEntities(
-        _ entities: [LabeledEntity], label: Label, source: SourceInfo, limit: Int? = nil
-    ) -> String
-    {
-        var lines = header(
-            source, "Label \(label.id) \(label.name ?? "(unnamed)") · \(entities.count) shown")
-        for entity in entities {
-            lines.append(
-                "\(entity.contactJID ?? entity.entityKey ?? "unknown")"
-                    + (entity.entityType.map { " · entity type \($0)" } ?? "")
-                    + " · \(when(entity.date))")
+        _ entities: [LabeledEntity], total: Int, label: Label, source: SourceInfo, offset: Int,
+        notices: [String]
+    ) -> String {
+        sourcePage(
+            entities, offset: offset, total: total, things: "labelled items", notices: notices,
+            heading: [
+                sourceLine(source),
+                "Label \(label.id) \(label.name ?? "(unnamed)") · \(total) labelled · newest first", "",
+            ],
+            empty: "Nothing carries this label."
+        ) { entity, _ in
+            "\(entity.contactJID ?? entity.entityKey ?? "unknown")"
+                + (entity.entityType.map { " · entity type \($0)" } ?? "")
+                + " · \(when(entity.date))"
         }
-        lines += limitNote(shown: entities.count, limit: limit, pagedWithOffset: false)
-        return lines.joined(separator: "\n")
     }
 
     public func addressBook(
-        _ entries: [AddressBookEntry], source: SourceInfo, limit: Int? = nil, offset: Int = 0
+        _ entries: [AddressBookEntry], total: Int, source: SourceInfo, offset: Int,
+        notices: [String]
     ) -> String {
-        guard !entries.isEmpty else { return sourceLine(source) + "\n\nNo entries found." }
-        var lines = header(source, "\(entries.count) entr\(entries.count == 1 ? "y" : "ies")")
-        for entry in entries {
+        sourcePage(
+            entries, offset: offset, total: total, things: "entries", notices: notices,
+            heading: [sourceLine(source), Self.plural(total, "entry", "entries") + " · by name", ""],
+            empty: "No entries found."
+        ) { entry, _ in
             var parts = ["\(entry.id)  \(entry.fullName ?? entry.businessName ?? "(no name)")"]
             if entry.fullName != nil, let business = entry.businessName { parts.append("business \(business)") }
             if let phone = entry.phoneNumber { parts.append("phone \(phone)") }
@@ -335,52 +441,52 @@ public struct Format: Sendable {
             if let id = entry.whatsappID { parts.append("whatsapp id \(id)") }
             if let username = entry.username { parts.append("username \(username)") }
             if let about = entry.about { parts.append("about: \(about)") }
-            lines.append(parts.joined(separator: " · "))
+            return parts.joined(separator: " · ")
         }
-        lines += limitNote(shown: entries.count, limit: limit, offset: offset, pagedWithOffset: true)
-        return lines.joined(separator: "\n")
     }
 
     public func lidMatches(
-        _ matches: [LIDMatch], value: String, sources: [SourceInfo], notes: [String] = []
+        _ matches: [LIDMatch], value: String, sources: [SourceInfo], notes: [String] = [],
+        limit: Int, offset: Int, notices: [String]
     ) -> String {
-        var lines = sources.map(sourceLine) + notes.map { "NOTE: \($0)" }
-        lines.append("\(matches.count) record(s) for '\(value)'")
-        lines.append("")
-        if matches.isEmpty {
-            lines.append(
-                "WhatsApp stored nothing for this value on this Mac. That is not proof that no "
-                    + "pairing exists: coverage of these tables has not been measured.")
-        }
-        for match in matches {
+        let heading =
+            sources.map(sourceLine) + notes.map { "NOTE: \($0)" }
+            + ["\(matches.count) record(s) for '\(ToolStandard.echo(value))'", ""]
+        return sourcePage(
+            Array(matches.dropFirst(offset).prefix(limit)), offset: offset, total: matches.count,
+            things: "records", notices: notices, heading: heading,
+            empty: "WhatsApp stored nothing for this value on this Mac. That is not proof that no "
+                + "pairing exists: coverage of these tables has not been measured."
+        ) { match, _ in
             var parts = [match.source]
             if let lid = match.lid { parts.append("lid \(lid)") }
             if let phone = match.phoneNumber { parts.append("phone \(phone)") }
             if let name = match.displayName { parts.append("name \(name)") }
             if let push = match.pushName { parts.append("push name \(push)") }
             if let username = match.username { parts.append("username \(username)") }
-            lines.append(parts.joined(separator: " · "))
+            return parts.joined(separator: " · ")
         }
-        return lines.joined(separator: "\n")
     }
 
-    public func channels(_ channels: [Channel], source: SourceInfo, limit: Int? = nil) -> String {
-        guard !channels.isEmpty else { return sourceLine(source) + "\n\nNo channels found." }
-        var lines = header(source, "\(channels.count) channel\(channels.count == 1 ? "" : "s")")
-        for channel in channels {
+    public func channels(
+        _ channels: [Channel], total: Int, source: SourceInfo, offset: Int, notices: [String]
+    ) -> String {
+        sourcePage(
+            channels, offset: offset, total: total, things: "channels", notices: notices,
+            heading: [sourceLine(source), Self.plural(total, "channel", "channels") + " · by name", ""],
+            empty: "No channels found."
+        ) { channel, _ in
             var line = "\(channel.name ?? "(unnamed)") · \(channel.jid)"
             if let by = channel.addedByName ?? channel.addedByLID { line += " · added by \(by)" }
-            lines.append(line)
+            return line
         }
-        lines += limitNote(shown: channels.count, limit: limit, pagedWithOffset: false)
-        return lines.joined(separator: "\n")
     }
 
     // MARK: Chats
 
-    public func chats(_ chats: [Chat], query: ChatQuery) -> String {
+    public func chats(_ page: ChatPage, query: ChatQuery, notices: [String]) -> String {
         var criteria: [String] = []
-        if let name = query.name { criteria.append("name matching \"\(name)\"") }
+        if let name = query.name { criteria.append("name matching \"\(ToolStandard.echo(name))\"") }
         if !query.kinds.isEmpty {
             criteria.append(query.kinds.map(\.rawValue).joined(separator: "/"))
         }
@@ -388,11 +494,32 @@ public struct Format: Sendable {
         if query.includeHidden { criteria.append("including hidden") }
         let scope = criteria.isEmpty ? "" : " · \(criteria.joined(separator: " · "))"
 
-        guard !chats.isEmpty else { return "No chats found\(scope)." }
+        var held = notices
+        if page.archivedNotShown > 0 {
+            held.append(
+                Notice.notShown(
+                    count: page.archivedNotShown, things: "archived chats",
+                    pass: "include_archived=true"))
+        }
+        if page.hiddenNotShown > 0 {
+            held.append(
+                Notice.notShown(
+                    count: page.hiddenNotShown, things: "hidden chats", pass: "include_hidden=true"))
+        }
+        var footer = [""]
+        if page.rows.contains(where: \.isPinned) {
+            footer.append(
+                "Pinned chats come first, as they do in WhatsApp, so this list is not "
+                    + "purely newest-first. Their dates are real.")
+            footer.append("")
+        }
+        footer.append("Use chat_get with an id from the first column.")
 
-        var lines = ["\(chats.count) chat\(chats.count == 1 ? "" : "s")\(scope)"]
-        lines.append("")
-        for chat in chats {
+        let text = sourcePage(
+            page.rows, offset: query.offset, total: page.total, things: "chats", notices: held,
+            heading: [Self.plural(page.total, "chat", "chats") + scope + " · latest activity first", ""],
+            empty: "No chats found."
+        ) { chat, _ in
             var line = "\(chat.id)  \(chat.name)  [\(chat.kind.rawValue)]"
             if chat.isPinned { line += " (pinned)" }
             if chat.isArchived { line += " (archived)" }
@@ -402,59 +529,60 @@ public struct Format: Sendable {
             if let date = chat.lastMessageDate {
                 line += " · last \(DateParsing.roundTrip(date, calendar: calendar))"
             }
-            lines.append(line)
+            return line
         }
-        lines.append("")
-        if chats.contains(where: \.isPinned) {
-            lines.append(
-                "Pinned chats come first, as they do in WhatsApp, so this list is not "
-                    + "purely newest-first. Their dates are real.")
-        }
-        lines += limitNote(
-            shown: chats.count, limit: query.limit, offset: query.offset, pagedWithOffset: true)
-        lines.append("")
-        lines.append("Use chat_get with an id from the first column.")
-        return lines.joined(separator: "\n")
+        return page.rows.isEmpty ? text : text + "\n" + footer.joined(separator: "\n")
     }
 
     // MARK: Messages
 
-    public func chatPage(_ page: MessagePage, chat: Chat, query: MessageQuery) -> String {
+    public func chatPage(
+        _ page: MessagePage, chat: Chat, query: MessageQuery, notices: [String]
+    ) -> String {
         var header = "\(chat.name) · id=\(chat.id) · \(page.total) matching"
         header += query.newestFirst ? " · newest first" : " · oldest first"
-
-        guard !page.rows.isEmpty else {
-            return "\(header)\n\nNo messages matched. Widen the range or drop a filter."
-        }
-
-        var lines = [header, ""]
-        lines.append(contentsOf: page.rows.map { messageLine($0, includingChat: false) })
-        lines.append(contentsOf: footnotes(for: page.rows))
-        lines.append(contentsOf: paging(page, query: query))
-        return lines.joined(separator: "\n")
+        return messagePage(
+            page, query: query, notices: notices, heading: header, includingChat: false,
+            empty: "No messages matched. Widen the range or drop a filter.")
     }
 
-    public func searchResults(_ page: MessagePage, query: MessageQuery) -> String {
-        guard !page.rows.isEmpty else { return "No messages matched \(scope(of: query))." }
-
-        var lines = ["\(page.total) matching · \(scope(of: query))", ""]
+    public func searchResults(_ page: MessagePage, query: MessageQuery, notices: [String]) -> String {
         // The chat is named on every line here and on none in chat_get: there it is the
-        // header, and repeating it down the page would say the same thing 50 times.
-        lines.append(contentsOf: page.rows.map { messageLine($0, includingChat: true) })
-        lines.append(contentsOf: footnotes(for: page.rows))
-        lines.append(contentsOf: paging(page, query: query))
-        return lines.joined(separator: "\n")
+        // header, and repeating it down the page would say the same thing on every line.
+        messagePage(
+            page, query: query, notices: notices,
+            heading: "\(page.total) matching · \(scope(of: query)) · \(order(query))",
+            includingChat: true, empty: "No messages matched \(scope(of: query)).")
     }
 
-    public func media(_ page: MessagePage, query: MessageQuery) -> String {
-        guard !page.rows.isEmpty else { return "No attachments matched \(scope(of: query))." }
+    public func media(_ page: MessagePage, query: MessageQuery, notices: [String]) -> String {
+        messagePage(
+            page, query: query, notices: notices,
+            heading: "\(page.total) shared · \(scope(of: query)) · \(order(query))",
+            includingChat: query.chatID == nil, empty: "No attachments matched \(scope(of: query)).")
+    }
 
-        var lines = ["\(page.total) shared · \(scope(of: query))", ""]
-        lines.append(
-            contentsOf: page.rows.map { messageLine($0, includingChat: query.chatID == nil) })
-        lines.append(contentsOf: footnotes(for: page.rows))
-        lines.append(contentsOf: paging(page, query: query))
-        return lines.joined(separator: "\n")
+    private func order(_ query: MessageQuery) -> String {
+        query.newestFirst ? "newest first" : "oldest first"
+    }
+
+    /// The page the store cut, rendered through `fitting`: rows wider than ordinary make
+    /// the page hold fewer, and the notice says where the next one starts.
+    private func messagePage(
+        _ page: MessagePage, query: MessageQuery, notices: [String], heading: String,
+        includingChat: Bool, empty: String
+    ) -> String {
+        guard page.total > 0 else { return ToolStandard.withNotices(notices, empty) }
+        return ToolStandard.fitting(page.rows.count) { size in
+            let rows = Array(page.rows.prefix(size))
+            var clips = ClippedFields()
+            let lines = rows.map { messageLine($0, includingChat: includingChat, clips: &clips) }
+            let position = Notice.page(
+                offset: query.offset, count: rows.count, total: page.total, things: "messages")
+            let all = notices + [position].compactMap { $0 } + clips.notices(tool: ToolCatalog.messageGetName)
+            let body = [heading, ""] + lines + footnotes(for: rows)
+            return ToolStandard.withNotices(all, body.joined(separator: "\n"))
+        }
     }
 
     /// Everything the database holds about one message, on its own lines.
@@ -462,8 +590,20 @@ public struct Format: Sendable {
     /// The first line is the same line the other three tools print, so a caller can see it
     /// is looking at the row it asked for, and everything after it is what would not fit
     /// there.
-    public func messageDetail(_ message: Message) -> String {
-        var lines = [messageLine(message, includingChat: true), ""]
+    public func messageDetail(
+        _ message: Message, characterOffset: Int, maxCharacters: Int, notices: [String]
+    ) -> String {
+        let whole = messageDetailText(message)
+        return ToolStandard.fitting(maxCharacters) { size in
+            let window = ToolStandard.window(
+                of: whole, characterOffset: characterOffset, maxCharacters: size)
+            return ToolStandard.withNotices(notices + [window.notice].compactMap { $0 }, window.text)
+        }
+    }
+
+    func messageDetailText(_ message: Message) -> String {
+        var whole = ClippedFields(clipping: false)
+        var lines = [messageLine(message, includingChat: true, clips: &whole), ""]
 
         lines.append("chat: \(message.chatName) · id=\(message.chatID)")
         if let sender = message.sender {
@@ -634,7 +774,11 @@ public struct Format: Sendable {
 
     // MARK: Groups
 
-    public func group(_ group: Group, chat: Chat) -> String {
+    /// The group's own facts, then one page of its member rows, by address.
+    public func group(_ group: Group, chat: Chat, limit: Int, offset: Int, notices: [String]) -> String {
+        let members = group.members.sorted {
+            ($0.identity.jid, $0.identity.displayName) < ($1.identity.jid, $1.identity.displayName)
+        }
         var lines = [
             "\(chat.name) · id=\(chat.id) · \(group.members.count) member"
                 + (group.members.count == 1 ? "" : "s")
@@ -670,18 +814,18 @@ public struct Format: Sendable {
                 + "rows flagged inactive are kept. What inactive means — left, removed, "
                 + "something else — the database does not say.")
         lines.append("")
+        lines.append("Members, by address:")
+        lines.append("")
 
-        if group.members.isEmpty {
-            lines.append("(no member rows found)")
-        } else {
-            for member in group.members {
-                var line = "\(member.identity.jid)  \(member.identity.displayName)"
-                if member.isAdmin == true { line += "  (admin)" }
-                if member.isActive == false { line += "  (inactive)" }
-                lines.append(line)
-            }
+        return sourcePage(
+            Array(members.dropFirst(offset).prefix(limit)), offset: offset, total: members.count,
+            things: "members", notices: notices, heading: lines, empty: "(no member rows found)"
+        ) { member, _ in
+            var line = "\(member.identity.jid)  \(member.identity.displayName)"
+            if member.isAdmin == true { line += "  (admin)" }
+            if member.isActive == false { line += "  (inactive)" }
+            return line
         }
-        return lines.joined(separator: "\n")
     }
 
     // MARK: The shared message line
@@ -691,7 +835,11 @@ public struct Format: Sendable {
     /// A message that is not words says **what it was** — a photo, a sticker, a voice note
     /// with its length — because a message with no text is not an empty message, and the
     /// difference between a record and a gap is exactly that word.
-    func messageLine(_ message: Message, includingChat: Bool) -> String {
+    ///
+    /// The fields other people write at any length (the text, a file name, a link and its
+    /// title, the reactions) are shortened to their width in `Configuration`, and `clips`
+    /// records which were, so the page says so once.
+    func messageLine(_ message: Message, includingChat: Bool, clips: inout ClippedFields) -> String {
         var line = "\(message.id)  \(DateParsing.roundTrip(message.date, calendar: calendar))"
         if includingChat { line += "  \(message.chatName)" }
 
@@ -721,7 +869,9 @@ public struct Format: Sendable {
             line += " [location] \(coordinates.description)"
         case .contactCard(let card):
             line += " [contact]"
-            if let name = card.name { line += " \(name)" }
+            if let name = card.name {
+                line += " " + clips.clip(name, to: Configuration.titleWidth, field: "Contact name")
+            }
         case .deletedForEveryone:
             line += " [deleted for everyone]"
         case .other(let typeCode):
@@ -731,24 +881,39 @@ public struct Format: Sendable {
         }
 
         if let text = message.text, !text.isEmpty {
-            line += " \(text.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe)"
+            line +=
+                " "
+                + clips.clip(
+                    text.replacingOccurrences(of: "\n", with: " ⏎ ").displaySafe,
+                    to: Configuration.textWidth, field: "Text")
         }
 
         if case .attachment(let attachment) = message.body {
-            if let title = attachment.title { line += "  \(title)" }
+            if let title = attachment.title {
+                line += "  " + clips.clip(title, to: Configuration.titleWidth, field: "Filename")
+            }
             // Present means the file is genuinely here; absent is the ordinary case and is
             // explained once in the footnote rather than 50 times down the page.
             if let path = attachment.localPath { line += "  \(path)" }
         }
         if case .link(let preview) = message.body {
-            if let url = preview.url { line += "  → \(url)" }
-            if let title = preview.title { line += " — \"\(title)\"" }
+            if let url = preview.url {
+                line += "  → " + clips.clip(url, to: Configuration.linkWidth, field: "Link")
+            }
+            if let title = preview.title {
+                line += " — \"" + clips.clip(title, to: Configuration.titleWidth, field: "Link title") + "\""
+            }
         }
         if let quote = message.quote {
             line += quote.localMessageID.map { "  ↩\($0)" } ?? "  ↩"
         }
         if !message.reactions.isEmpty {
-            line += "  [" + message.reactions.map(\.emoji).joined(separator: " ") + "]"
+            line +=
+                "  ["
+                + clips.clip(
+                    message.reactions.map(\.emoji).joined(separator: " "),
+                    to: Configuration.reactionsWidth, field: "Reactions")
+                + "]"
         }
         if message.isStarred { line += "  ★" }
         return line
@@ -783,13 +948,13 @@ public struct Format: Sendable {
 
     private func scope(of query: MessageQuery) -> String {
         var criteria: [String] = []
-        if let text = query.text { criteria.append("text \"\(text)\"") }
+        if let text = query.text { criteria.append("text \"\(ToolStandard.echo(text))\"") }
         if let chatID = query.chatID { criteria.append("in chat \(chatID)") }
         if !query.kinds.isEmpty {
             criteria.append(query.kinds.map(\.rawValue).joined(separator: "/"))
         }
-        if let after = query.after {
-            criteria.append("after \(DateParsing.roundTrip(after, calendar: calendar))")
+        if let from = query.from {
+            criteria.append("from \(DateParsing.roundTrip(from, calendar: calendar))")
         }
         if let before = query.before {
             criteria.append("before \(DateParsing.roundTrip(before, calendar: calendar))")
@@ -799,17 +964,30 @@ public struct Format: Sendable {
         return criteria.isEmpty ? "every message" : criteria.joined(separator: " · ")
     }
 
-    /// A truncated answer has to say what it withheld, or it reads as the whole of it.
-    private func paging(_ page: MessagePage, query: MessageQuery) -> [String] {
-        let shown = query.offset + page.rows.count
-        guard page.total > shown else { return [] }
-        return [
-            "",
-            "Showing \(query.offset + 1)–\(shown) of \(page.total). Pass offset=\(shown) for the next page.",
-        ]
-    }
-
     private static func clock(_ seconds: Int) -> String {
         "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+/// The fields a result shortened, each announced once, in the order first met.
+public struct ClippedFields: Sendable {
+    private var clipping: Bool
+    private var fields: [(name: String, width: Int)] = []
+
+    /// `clipping: false` shows every field whole: the detail of one message is where the
+    /// rest is read.
+    public init(clipping: Bool = true) {
+        self.clipping = clipping
+    }
+
+    /// `text` at most `width` characters long, ending in "…" when it was cut.
+    public mutating func clip(_ text: String, to width: Int, field: String) -> String {
+        guard clipping, text.count > width else { return text }
+        if !fields.contains(where: { $0.name == field }) { fields.append((field, width)) }
+        return String(text.prefix(width - 1)) + "…"
+    }
+
+    public func notices(tool: String) -> [String] {
+        fields.map { Notice.clipped(field: $0.name, width: $0.width, tool: tool) }
     }
 }
