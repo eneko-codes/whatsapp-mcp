@@ -3,7 +3,7 @@ import Foundation
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.5.1"
+    public static let version = "1.5.2"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and keeps nothing, that
@@ -14,8 +14,8 @@ public enum WhatsAppMCPServer {
         any other network. Reading a database in WAL mode does update that database's \
         -shm index file, which SQLite uses to coordinate readers with the writer; it holds \
         no messages. On recent macOS, reading \
-        WhatsApp's container needs Full Disk Access for this server's program, and every \
-        rebuilt or updated copy needs it again. whatsapp_status says whether macOS allowed \
+        WhatsApp's container needs Full Disk Access for this server's program, and a copy \
+        signed ad hoc needs it again after every rebuild or update. whatsapp_status says whether macOS allowed \
         the read (and, if it refused, the exact steps), whether the chat database is \
         present, and the shape the queries expect. If a tool says macOS refused access to \
         WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
