@@ -31,7 +31,7 @@ A local MCP server (Swift 6, stdio transport) for WhatsApp. Reading WhatsApp's c
 
 **`MCPServer.swift`, `Value.swift`, `ToolStandard.swift` and the tests `MCPProtocolTests.swift` and `ToolStandardTests.swift` are copied unchanged into every one of the owner's MCP servers** (the test files differ only in their `@testable import`). A change to one is made to every copy in the same piece of work; never let a copy drift.
 
-`ToolStandard.swift` holds what every tool here must keep to: the longest result, description and error, the time a call may take, the fixed wording of each notice that says what a result left out (`Notice`), and the guard `MCPServer.swift` passes every result through. A tool bounds its own result and says how to get the rest; the guard only catches the one that forgot. `Deadline.swift` is a copy of the same enum in the other servers, kept apart so it can be replaced when it moves into the shared file.
+`ToolStandard.swift` holds what every tool here must keep to: the longest result, description and error, the time a call may take, the fixed wording of each notice that says what a result left out (`Notice`), and the guard `MCPServer.swift` passes every result through. A tool bounds its own result and says how to get the rest; the guard only catches the one that forgot. `Deadline`, which abandons a call at its time limit, is part of `ToolStandard.swift`.
 
 Not affiliated with, endorsed by, or connected to WhatsApp or Meta.
 
