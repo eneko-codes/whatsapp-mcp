@@ -123,8 +123,9 @@ public enum ToolError: Error, Equatable {
           3. Quit the app that starts the server (Claude Desktop, or the one in step 2)
              completely and open it again.
 
-        Each rebuilt or updated copy of this server is a new program to macOS: the grant
-        given to the old one does not carry over, so repeat this after every update.
+        A copy of this server signed ad hoc is a new program to macOS after every rebuild:
+        the grant given to the old one does not carry over, so repeat this after every update.
+        A copy signed with a stable certificate keeps its identity across rebuilds.
         """
     }
 

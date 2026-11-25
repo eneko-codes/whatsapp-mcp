@@ -69,7 +69,7 @@ public struct Format: Sendable {
             lines.append("    System Settings → Privacy & Security → Full Disk Access, turn on the")
             lines.append("    program on the `binary:` line above (or add it with +; if Claude Code or a")
             lines.append("    terminal starts the server, that program instead), then quit and reopen the")
-            lines.append("    app that starts the server. A rebuilt or updated copy is a new program: grant it again.")
+            lines.append("    app that starts the server. An ad-hoc rebuild or update is a new program: grant it again.")
         case .ready:
             lines.append("  permission: macOS allowed this server to read it")
         case .databaseMissing, .databaseUnreadable, .schemaUnexpected:

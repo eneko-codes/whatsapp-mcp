@@ -46,8 +46,8 @@ Not affiliated with or endorsed by WhatsApp or Meta.
   talks to WhatsApp's own servers
 
 Reading WhatsApp's data needs **Full Disk Access** for this server's program on recent macOS,
-and macOS ties that grant to the exact program: every rebuilt or updated copy needs it again
-— see [Permissions](#permissions).
+and macOS ties that grant to the exact program: a copy signed ad hoc (the default) needs it
+again after every rebuild or update — see [Permissions](#permissions).
 
 ## Tools
 
@@ -165,11 +165,13 @@ same steps in every tool — and not as "not found".
    If you start the server by hand, it is the terminal or app you started it from.
 3. Quit that app completely and open it again.
 
-**Repeat this after every update.** The grant belongs to the exact program: a rebuilt
-`whatsapp-mcp` signed ad-hoc is a new program to macOS, and so is a new version of whatever
-app launches it (Claude Code lost its own grant this way when it updated). A stable signing
-identity would keep the grant across rebuilds, but a certificate's subject carries the name
-of whoever holds it, so a binary meant to be published must not be signed with a personal one.
+**Repeat this after every update of an ad-hoc build.** The grant belongs to the exact program:
+a rebuilt `whatsapp-mcp` signed ad-hoc is a new program to macOS, and so is a new version of
+whatever app launches it (Claude Code lost its own grant this way when it updated). A build
+signed with a stable identity (see [Signing](#signing)) should keep the grant across rebuilds;
+if `whatsapp_status` says ACCESS DENIED after an update, grant it again. A certificate's subject
+carries the name of whoever holds it, so a binary meant to be published must not be signed with
+a personal one.
 
 **Uninstalling:** remove the extension in Claude, remove the `whatsapp-mcp` entry from Full
 Disk Access, and delete `~/Library/Caches/whatsapp-mcp` (`rm -rf` it) — on a Mac that ran an
@@ -253,13 +255,13 @@ FOUND` means the file is not there — open WhatsApp for Mac at least once. For 
 
 An ad-hoc signature (the default) runs, but it is a new program to macOS on every build, so
 Full Disk Access must be granted again each time. A stable identity (`MCPB_SIGN_IDENTITY`)
-keeps the grant — but never sign a binary you publish with a personal certificate, whose
+should keep the grant — but never sign a binary you publish with a personal certificate, whose
 subject carries its holder's name.
 
 ### Preparing something to distribute
 
 ```bash
-MCPB_SIGN_IDENTITY="Developer ID Application: …" ./scripts/pack.sh
+MCPB_SIGN_IDENTITY="<Developer ID Application hash>" ./scripts/pack.sh
 ```
 
 A binary meant to run on someone else's Mac needs a real identity, and Full Disk Access is
