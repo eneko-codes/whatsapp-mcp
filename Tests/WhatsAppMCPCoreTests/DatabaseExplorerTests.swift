@@ -194,14 +194,14 @@ struct ContainerDatabasesTests {
 
         let mainFile = try Data(contentsOf: fake.sourceURL(.contacts))
         var rows = try fake.explorer().select(
-            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10)
+            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10, offset: 0, maxCharacters: Configuration.queryCharacters)
         #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma"])
 
         sqlite3_exec(writer, "INSERT INTO ZINVENTED (ZNAME) VALUES ('delta')", nil, nil, nil)
         // Only the log changed: the main file is byte for byte what it was.
         #expect(try Data(contentsOf: fake.sourceURL(.contacts)) == mainFile)
         rows = try fake.explorer().select(
-            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10)
+            "SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", in: .contacts, limit: 10, offset: 0, maxCharacters: Configuration.queryCharacters)
         #expect(rows.rows.map { $0[0] } == ["alpha", "beta", "gamma", "delta"])
         #expect((rows.source.walBytes ?? 0) > 0)
     }
@@ -222,7 +222,7 @@ struct ContainerDatabasesTests {
         try? FileManager.default.removeItem(atPath: path + "-shm")
 
         let rows = try fake.explorer().select(
-            "SELECT count(*) FROM ZINVENTED", in: .contacts, limit: 10)
+            "SELECT count(*) FROM ZINVENTED", in: .contacts, limit: 10, offset: 0, maxCharacters: Configuration.queryCharacters)
         #expect(rows.rows == [["3"]])
         #expect(!FileManager.default.fileExists(atPath: path + "-wal"))
         #expect(!FileManager.default.fileExists(atPath: path + "-shm"))
@@ -269,12 +269,13 @@ struct ContainerDatabasesTests {
 @Suite("db_query")
 struct DatabaseQueryTests {
 
-    private func query(_ sql: String, limit: Int? = nil) async throws -> (String, Bool) {
+    private func query(_ sql: String, limit: Int? = nil, offset: Int? = nil) async throws -> (String, Bool) {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try fake.make(.callHistory)
         var arguments: [String: Value] = ["db": .string("CallHistory"), "sql": .string(sql)]
         if let limit { arguments["limit"] = .int(limit) }
+        if let offset { arguments["offset"] = .int(offset) }
         return await call(fake.tools(), ToolCatalog.dbQueryName, arguments)
     }
 
@@ -317,7 +318,9 @@ struct DatabaseQueryTests {
         ] {
             let (text, isError) = try await query(sql)
             #expect(isError, "\(sql) was accepted")
-            #expect(text.contains("refused") || text.contains("not valid"), "\(sql): \(text)")
+            #expect(
+                text.contains("refused") || text.contains("not valid") || text.contains("Missing"),
+                "\(sql): \(text)")
         }
     }
 
@@ -339,10 +342,12 @@ struct DatabaseQueryTests {
     @Test("Thousands of wide columns cannot produce an unbounded answer")
     func outputSizeIsCapped() async throws {
         let columns = (0..<400).map { "printf('%2000s', 'x') AS c\($0)" }.joined(separator: ", ")
-        let (text, isError) = try await query("SELECT \(columns) FROM ZINVENTED", limit: 500)
+        let (text, isError) = try await query("SELECT \(columns) FROM ZINVENTED", limit: 200)
         #expect(!isError)
-        #expect(text.count < 400_000, "\(text.count) characters")
-        #expect(text.contains("output size cap"))
+        #expect(text.utf16.count <= ToolStandard.longestResult, "\(text.utf16.count) characters")
+        #expect(text.hasPrefix("limit=200 is outside 1–200") == false)
+        #expect(text.contains("more exist. Pass offset=1 for the next page."), Comment(rawValue: String(text.prefix(300))))
+        #expect(text.contains("Every value is clipped to"))
     }
 
     @Test("db_schema finds a table whatever the case of its name")
@@ -378,10 +383,17 @@ struct DatabaseQueryTests {
 
     @Test("The row limit truncates and says so")
     func limitTruncates() async throws {
-        let (text, isError) = try await query("SELECT ZNAME FROM ZINVENTED", limit: 1)
+        let (text, isError) = try await query("SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", limit: 1)
         #expect(!isError)
+        #expect(text.hasPrefix("Showing 1–1 rows; more exist. Pass offset=1 for the next page."), Comment(rawValue: text))
         #expect(text.contains("1 row"))
-        #expect(text.contains("more rows exist"))
+
+        let (rest, _) = try await query("SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", limit: 1, offset: 1)
+        // The second page starts where the first ended and, being the last, says so.
+        #expect(rest.hasPrefix("Showing 2–2 of 2 rows. That is all."), Comment(rawValue: rest))
+        #expect(rest.contains("beta") && !rest.contains("alpha"))
+        let (past, _) = try await query("SELECT ZNAME FROM ZINVENTED ORDER BY Z_PK", offset: 9)
+        #expect(past.hasPrefix("Showing 0 of 2 rows: offset=9 is past the end. That is all."), Comment(rawValue: past))
     }
 
     @Test("A runaway statement is stopped at its time limit")

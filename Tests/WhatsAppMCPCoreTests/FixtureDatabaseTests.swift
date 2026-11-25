@@ -437,7 +437,7 @@ struct FixtureDatabaseTests {
         defer { fixture.remove() }
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
-        let chats = try await store.chats(matching: ChatQuery())
+        let chats = try await store.chats(matching: ChatQuery()).rows
         let pinned = try #require(chats.first { $0.id == 2 })
 
         #expect(pinned.isPinned)
@@ -453,7 +453,7 @@ struct FixtureDatabaseTests {
         defer { fixture.remove() }
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
-        let chats = try await store.chats(matching: ChatQuery())
+        let chats = try await store.chats(matching: ChatQuery()).rows
         let ordinary = try #require(chats.first { $0.id == 1 })
 
         #expect(!ordinary.isPinned)
@@ -467,7 +467,7 @@ struct FixtureDatabaseTests {
         defer { fixture.remove() }
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
-        let chats = try await store.chats(matching: ChatQuery(kinds: [.status]))
+        let chats = try await store.chats(matching: ChatQuery(kinds: [.status])).rows
         let status = try #require(chats.first { $0.id == 4 })
 
         #expect(status.isPinned)
@@ -480,7 +480,7 @@ struct FixtureDatabaseTests {
         defer { fixture.remove() }
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
-        for chat in try await store.chats(matching: ChatQuery(includeArchived: true)) {
+        for chat in try await store.chats(matching: ChatQuery(includeArchived: true)).rows {
             if let date = chat.lastMessageDate {
                 #expect(date.timeIntervalSinceNow < 1, "chat \(chat.id) is dated in the future")
             }
@@ -493,10 +493,10 @@ struct FixtureDatabaseTests {
         defer { fixture.remove() }
         let store = SystemWhatsAppStore(path: fixture.databasePath)
 
-        let plain = try await store.chats(matching: ChatQuery())
+        let plain = try await store.chats(matching: ChatQuery()).rows
         #expect(!plain.contains { $0.id == 5 })
 
-        let included = try await store.chats(matching: ChatQuery(includeHidden: true))
+        let included = try await store.chats(matching: ChatQuery(includeHidden: true)).rows
         let hidden = try #require(included.first { $0.id == 5 })
         #expect(hidden.isHidden == true)
     }
@@ -549,7 +549,7 @@ struct FixtureDatabaseTests {
         // Every tool agrees on one name: the newest row.
         let message = try #require(after.rows.first { $0.id == 30 })
         #expect(message.sender?.displayName == "Grace Newer Name")
-        let chats = try await store.chats(matching: ChatQuery(kinds: [.group], includeArchived: true, includeHidden: true))
+        let chats = try await store.chats(matching: ChatQuery(kinds: [.group], includeArchived: true, includeHidden: true)).rows
         let group = try #require(chats.first { $0.id == 3 })
         #expect(group.messageCount == before.total, "chats_list and chat_get disagree")
     }

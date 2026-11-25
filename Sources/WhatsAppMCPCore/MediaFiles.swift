@@ -87,6 +87,8 @@ public struct MediaFiles: Sendable {
         case tooLarge(Int64, limit: Int64)
         case tooManyPixels(Int, limit: Int)
         case locked
+        /// `first_page` is past the end of a PDF of `pageCount` pages.
+        case pastLastPage(Int, pageCount: Int)
     }
 
     /// Larger than any photo or document WhatsApp lets through, small enough that a
@@ -181,48 +183,54 @@ public struct MediaFiles: Sendable {
         return result
     }
 
-    public struct PDFText: Sendable, Equatable {
+    /// The text of a document, or of the pages of a PDF that were asked for.
+    public struct DocumentText: Sendable, Equatable {
         public var text: String
+        /// Every page the document has; 1 for a text file.
         public var pageCount: Int
-        public var truncated: Bool
+        /// The pages `text` covers, numbered from one. Empty for a PDF with no pages.
+        public var pages: ClosedRange<Int>?
     }
 
-    /// The text layer of a PDF. A scan has none, and that is reported, not hidden: an
-    /// empty string with `pageCount > 0` means "no text layer", not "no content".
-    public static func pdfText(of url: URL, maxCharacters: Int = 60_000) throws -> PDFText {
+    /// The text layer of the PDF's pages `firstPage` to `lastPage`, numbered from one and
+    /// both included, each page under a `--- page N ---` line so a window that starts
+    /// mid-document says where it is. A scan has no text layer, and that is reported, not
+    /// hidden: empty text with `pageCount > 0` means "no text layer", not "no content".
+    /// `lastPage` past the end means the last page; `firstPage` past it is refused, so the
+    /// caller learns how many pages there are.
+    public static func pdfText(of url: URL, firstPage: Int = 1, lastPage: Int? = nil) throws
+        -> DocumentText
+    {
         try requireSize(url)
         guard let document = PDFDocument(url: url) else {
             throw ViewError.unreadable("not a PDF this Mac can open")
         }
         if document.isLocked { throw ViewError.locked }
-        // Page by page and stopping at the limit: `document.string` extracts every page
-        // first, which for a few thousand pages is gigabytes and many seconds to return
-        // sixty thousand characters.
-        var collected = ""
-        var stoppedEarly = false
-        for index in 0..<document.pageCount {
-            collected += document.page(at: index)?.string ?? ""
-            if collected.count >= maxCharacters {
-                stoppedEarly = index < document.pageCount - 1
-                break
-            }
+        let count = document.pageCount
+        guard count > 0 else { return DocumentText(text: "", pageCount: 0, pages: nil) }
+        guard firstPage <= count else { throw ViewError.pastLastPage(firstPage, pageCount: count) }
+        let last = min(lastPage ?? count, count)
+        // Page by page: `document.string` extracts every page first, which for a few
+        // thousand pages is gigabytes and many seconds to answer for a few of them.
+        var collected: [String] = []
+        var anyText = false
+        for number in firstPage...max(firstPage, last) {
+            let text = document.page(at: number - 1)?.string ?? ""
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { anyText = true }
+            collected.append("--- page \(number) ---\n\(text)")
         }
-        let truncated = collected.count > maxCharacters || stoppedEarly
-        return PDFText(
-            text: collected.count > maxCharacters ? String(collected.prefix(maxCharacters)) : collected,
-            pageCount: document.pageCount, truncated: truncated)
+        return DocumentText(
+            text: anyText ? collected.joined(separator: "\n\n") : "", pageCount: count,
+            pages: firstPage...max(firstPage, last))
     }
 
-    /// Plain text from a text document, decoded as UTF-8 only.
-    public static func plainText(of url: URL, maxCharacters: Int = 60_000) throws -> PDFText {
+    /// Plain text from a text document, decoded as UTF-8 only, whole.
+    public static func plainText(of url: URL) throws -> DocumentText {
         try requireSize(url)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else {
             throw ViewError.unreadable("not UTF-8 text")
         }
-        let truncated = text.count > maxCharacters
-        return PDFText(
-            text: truncated ? String(text.prefix(maxCharacters)) : text, pageCount: 1,
-            truncated: truncated)
+        return DocumentText(text: text, pageCount: 1, pages: 1...1)
     }
 
     /// Evenly spaced still frames from a video, as JPEGs.

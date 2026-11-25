@@ -16,11 +16,13 @@ public struct WhatsAppTools: ToolHandler {
     private let transcription: TranscriptionService?
     private let calendar: Calendar
     private let format: Format
+    private let timeout: Duration
 
     public init(
         store: any WhatsAppStore, explorer: (any DatabaseExplorer)? = nil,
         reader: (any DomainReader)? = nil, mediaFiles: MediaFiles? = nil,
-        transcription: TranscriptionService? = nil, calendar: Calendar = .current
+        transcription: TranscriptionService? = nil, calendar: Calendar = .current,
+        timeout: Duration = Configuration.callTimeout
     ) {
         self.store = store
         self.explorer = explorer
@@ -29,38 +31,56 @@ public struct WhatsAppTools: ToolHandler {
         self.transcription = transcription
         self.calendar = calendar
         self.format = Format(calendar: calendar)
+        self.timeout = timeout
     }
 
     public func handle(_ parameters: ToolCall) async -> ToolOutput {
         let started = ContinuousClock.now
-        do {
-            return ToolOutput(content: try await contents(parameters), isError: false)
-        } catch let error as ToolError {
+        let outcome = await Deadline.run(within: timeout) {
+            do {
+                return Result<[ToolOutput.Block], any Error>.success(try await contents(parameters))
+            } catch {
+                return .failure(error)
+            }
+        }
+        switch outcome {
+        case .success(let blocks)?:
+            return ToolOutput(content: blocks, isError: false)
+        case .failure(let error)?:
+            Diagnostics.toolFailed(parameters.name, error: error, since: started)
+            let message =
+                (error as? ToolError)?.message
+                ?? ToolError.storeFailure(error.localizedDescription).message
+            return ToolOutput(text: message, isError: true)
+        case nil:
+            let error = ToolError.timedOut(seconds: Int(timeout.components.seconds))
             Diagnostics.toolFailed(parameters.name, error: error, since: started)
             return ToolOutput(text: error.message, isError: true)
-        } catch {
-            Diagnostics.toolFailed(parameters.name, error: error, since: started)
-            return ToolOutput(
-                text: ToolError.storeFailure(error.localizedDescription).message, isError: true)
         }
     }
 
     /// Every tool answers with text except `media_view`, which also returns images.
     private func contents(_ parameters: ToolCall) async throws -> [ToolOutput.Block] {
+        guard let tool = ToolCatalog.all().first(where: { $0.name == parameters.name }) else {
+            throw ToolError.unknownTool(parameters.name)
+        }
+        let arguments = Arguments(parameters.arguments, calendar: calendar)
+        try arguments.refuseUnknown(
+            tool: tool.name,
+            allowed: Array((tool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]).keys))
+
         if parameters.name == ToolCatalog.mediaViewName {
             let availability = store.availability()
             guard availability.isUsable else { throw ToolError.storeUnavailable(availability) }
-            return try await mediaView(Arguments(parameters.arguments, calendar: calendar))
+            return try await mediaView(arguments)
         }
-        return [.text(try await run(parameters))]
+        return [.text(try await run(parameters.name, arguments))]
     }
 
-    private func run(_ parameters: ToolCall) async throws -> String {
-        let arguments = Arguments(parameters.arguments, calendar: calendar)
-
+    private func run(_ name: String, _ arguments: Arguments) async throws -> String {
         // Answered before the availability check: "why can nothing be read" is exactly the
         // question asked when the database is missing or the wrong shape.
-        if parameters.name == ToolCatalog.statusName {
+        if name == ToolCatalog.statusName {
             return format.status(
                 store.databaseInfo(), availability: store.availability(),
                 binaryPath: Self.binaryPath)
@@ -68,9 +88,9 @@ public struct WhatsAppTools: ToolHandler {
 
         // Before the chat-store check on purpose: db_* is how a broken chat store gets
         // diagnosed, and it reads other databases that may be perfectly fine.
-        switch parameters.name {
+        switch name {
         case ToolCatalog.dbTablesName, ToolCatalog.dbSchemaName, ToolCatalog.dbQueryName:
-            return try databaseTool(parameters.name, arguments)
+            return try databaseTool(name, arguments)
         // By path it needs no chat store at all, and by message id the store raises its own
         // error, so the availability check above would only hide the reason.
         case ToolCatalog.audioTranscribeName:
@@ -78,7 +98,7 @@ public struct WhatsAppTools: ToolHandler {
 
         case ToolCatalog.callsName, ToolCatalog.locationSharingName, ToolCatalog.labelsName,
             ToolCatalog.addressBookName, ToolCatalog.lidLookupName, ToolCatalog.channelsName:
-            return try domainTool(parameters.name, arguments)
+            return try domainTool(name, arguments)
         default:
             break
         }
@@ -86,31 +106,15 @@ public struct WhatsAppTools: ToolHandler {
         let availability = store.availability()
         guard availability.isUsable else { throw ToolError.storeUnavailable(availability) }
 
-        switch parameters.name {
-        case ToolCatalog.chatsName:
-            return try await chats(arguments)
-
-        case ToolCatalog.chatGetName:
-            return try await chat(arguments)
-
-        case ToolCatalog.searchName:
-            return try await search(arguments)
-
-        case ToolCatalog.messageGetName:
-            return try await message(arguments)
-
-        case ToolCatalog.mediaName:
-            return try await media(arguments)
-
-        case ToolCatalog.groupGetName:
-            return try await group(arguments)
-
-        case ToolCatalog.mediaGetName:
-            return try await mediaGet(arguments)
-
-        default:
-            throw ToolError.badArgument(
-                name: "name", reason: "'\(parameters.name)' is not a tool of this server")
+        switch name {
+        case ToolCatalog.chatsName: return try await chats(arguments)
+        case ToolCatalog.chatGetName: return try await chat(arguments)
+        case ToolCatalog.searchName: return try await search(arguments)
+        case ToolCatalog.messageGetName: return try await message(arguments)
+        case ToolCatalog.mediaName: return try await media(arguments)
+        case ToolCatalog.groupGetName: return try await group(arguments)
+        case ToolCatalog.mediaGetName: return try await mediaGet(arguments)
+        default: throw ToolError.unknownTool(name)
         }
     }
 
@@ -118,33 +122,34 @@ public struct WhatsAppTools: ToolHandler {
 
     private func chats(_ arguments: Arguments) async throws -> String {
         var query = ChatQuery()
-        query.name = arguments.optionalString("name")
+        query.name = try arguments.optionalString("name")
         query.kinds = try arguments.chatKinds("kinds")
         query.includeArchived = try arguments.bool("include_archived")
         query.includeHidden = try arguments.bool("include_hidden")
-        query.limit = try arguments.int(
-            "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
-        query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
+        (query.limit, query.offset) = try arguments.page(
+            defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
 
-        return format.chats(try await store.chats(matching: query), query: query)
+        return format.chats(
+            try await store.chats(matching: query), query: query, notices: arguments.notices)
     }
 
     private func chat(_ arguments: Arguments) async throws -> String {
-        let id = try arguments.requiredInt("chat_id")
+        let id = try arguments.requiredIdentifier("chat_id", in: Configuration.identifierRange)
+        var query = try messageQuery(arguments)
         guard let summary = try await store.chat(id: id) else {
             throw ToolError.chatNotFound(id: id)
         }
-
-        var query = try messageQuery(arguments)
         query.chatID = id
 
-        return format.chatPage(try await store.messages(matching: query), chat: summary, query: query)
+        return format.chatPage(
+            try await store.messages(matching: query), chat: summary, query: query,
+            notices: arguments.notices)
     }
 
     private func search(_ arguments: Arguments) async throws -> String {
         var query = try messageQuery(arguments)
-        query.chatID = try arguments.optionalInt("chat_id")
-        query.text = arguments.optionalString("query")
+        query.chatID = try arguments.optionalIdentifier("chat_id", in: Configuration.identifierRange)
+        query.text = try arguments.optionalString("query")
         // Without a phrase this would be "every message", which is chat_get's job. Starred
         // messages are the one list across chats that has no other tool.
         guard query.text != nil || query.starredOnly else {
@@ -153,23 +158,24 @@ public struct WhatsAppTools: ToolHandler {
                 reason: "give a phrase to find, or starred_only=true to list starred messages in every chat")
         }
 
-        return format.searchResults(try await store.messages(matching: query), query: query)
+        return format.searchResults(
+            try await store.messages(matching: query), query: query, notices: arguments.notices)
     }
 
     private func message(_ arguments: Arguments) async throws -> String {
-        let id = try arguments.requiredInt("message_id")
+        let id = try arguments.requiredIdentifier("message_id", in: Configuration.identifierRange)
+        let window = try arguments.window()
         guard let message = try await store.message(id: id) else {
             throw ToolError.messageNotFound(id: id)
         }
-        return format.messageDetail(message)
+        return format.messageDetail(
+            message, characterOffset: window.characterOffset, maxCharacters: window.maxCharacters,
+            notices: arguments.notices)
     }
 
     private func media(_ arguments: Arguments) async throws -> String {
         var query = try messageQuery(arguments)
-        query.chatID = try arguments.optionalInt("chat_id")
-        // The catalogue calls this property "kinds". Reading a name the schema does not
-        // declare cannot fail loudly — it just returns nothing, and the filter quietly
-        // never applies.
+        query.chatID = try arguments.optionalIdentifier("chat_id", in: Configuration.identifierRange)
         let requestedKinds = try arguments.mediaKinds("kinds")
         // WhatsApp attaches a ZWAMEDIAITEM row to an ordinary text message for a link
         // preview's thumbnail, so "has a media row" is not the same question as "is an
@@ -178,16 +184,36 @@ public struct WhatsAppTools: ToolHandler {
         // would let those text messages through dressed as attachments.
         query.kinds = requestedKinds.isEmpty ? MediaKind.allCases : requestedKinds
 
-        return format.media(try await store.media(matching: query), query: query)
+        return format.media(
+            try await store.media(matching: query), query: query, notices: arguments.notices)
+    }
+
+    private func group(_ arguments: Arguments) async throws -> String {
+        let id = try arguments.requiredIdentifier("chat_id", in: Configuration.identifierRange)
+        let page = try arguments.page(
+            defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+        guard let summary = try await store.chat(id: id) else {
+            throw ToolError.chatNotFound(id: id)
+        }
+        guard summary.kind == .group else {
+            throw ToolError.notAGroup(id: id, kind: summary.kind)
+        }
+        guard let group = try await store.group(chatID: id) else {
+            throw ToolError.storeFailure(
+                "chat \(id) is a group but has no ZWAGROUPINFO row — the database may be "
+                    + "mid-sync; try again after opening WhatsApp")
+        }
+        return format.group(
+            group, chat: summary, limit: page.limit, offset: page.offset,
+            notices: arguments.notices)
     }
 
     // MARK: Attachment files
 
     /// The message, its attachment, and the file's resolved URL when it is on this Mac.
-    private func attachment(_ arguments: Arguments) async throws -> (
+    private func attachment(id: Int64) async throws -> (
         message: Message, attachment: Attachment, url: URL?
     ) {
-        let id = try arguments.requiredInt("message_id")
         guard let message = try await store.message(id: id) else {
             throw ToolError.messageNotFound(id: id)
         }
@@ -214,14 +240,18 @@ public struct WhatsAppTools: ToolHandler {
         guard let transcription else {
             throw ToolError.mediaProblem("Transcription is not configured in this server.")
         }
-        let messageID = try arguments.optionalInt("message_id")
-        let path = arguments.optionalString("path")
+        let messageID = try arguments.optionalIdentifier(
+            "message_id", in: Configuration.identifierRange)
+        let path = try arguments.optionalString("path")
+        let language = try arguments.requiredString("language")
+        let window = try arguments.window()
         guard (messageID == nil) != (path == nil) else {
             throw ToolError.badArgument(
                 name: "message_id", reason: "give exactly one of 'message_id' and 'path'")
         }
 
         var heading: String?
+        var clips = ClippedFields()
         let url: URL
         if let path {
             guard let resolved = mediaFiles?.contained(path) else {
@@ -230,21 +260,24 @@ public struct WhatsAppTools: ToolHandler {
             }
             url = resolved
         } else {
-            let (message, attachment, resolved) = try await attachment(
-                Arguments(["message_id": .int(Int(messageID ?? 0))], calendar: calendar))
+            let (message, attachment, resolved) = try await attachment(id: messageID ?? 0)
             guard [.voiceNote, .audioFile, .video].contains(attachment.kind) else {
                 throw ToolError.mediaProblem(
                     "Message \(message.id) is a \(MediaKind(attachment.kind).rawValue), which has no sound to transcribe.")
             }
-            guard let resolved else { return format.mediaMissing(message, attachment: attachment) }
-            heading = format.mediaHeading(message, attachment: attachment)
+            guard let resolved else {
+                return format.mediaMissing(message, attachment: attachment, notices: arguments.notices)
+            }
+            heading = format.mediaHeading(message, attachment: attachment, clips: &clips)
             url = resolved
         }
 
         do {
-            let result = try await transcription.transcribe(
-                file: url, language: try arguments.requiredString("language"))
-            return format.transcription(result, heading: heading)
+            let result = try await transcription.transcribe(file: url, language: language)
+            return format.transcription(
+                result, heading: heading, characterOffset: window.characterOffset,
+                maxCharacters: window.maxCharacters,
+                notices: arguments.notices + clips.notices(tool: ToolCatalog.messageGetName))
         } catch let failure as TranscriptionError {
             throw ToolError.mediaProblem(failure.message)
         } catch MediaFiles.ViewError.accessDenied(let path) {
@@ -255,11 +288,15 @@ public struct WhatsAppTools: ToolHandler {
     }
 
     private func mediaGet(_ arguments: Arguments) async throws -> String {
-        let (message, attachment, url) = try await attachment(arguments)
-        guard let url else { return format.mediaMissing(message, attachment: attachment) }
+        let id = try arguments.requiredIdentifier("message_id", in: Configuration.identifierRange)
+        let (message, attachment, url) = try await attachment(id: id)
+        guard let url else {
+            return format.mediaMissing(message, attachment: attachment, notices: arguments.notices)
+        }
         do {
             return format.mediaFacts(
-                message, attachment: attachment, url: url, facts: try MediaFiles.facts(of: url))
+                message, attachment: attachment, url: url, facts: try MediaFiles.facts(of: url),
+                notices: arguments.notices)
         } catch MediaFiles.ViewError.accessDenied(let path) {
             throw ToolError.accessDenied(path)
         } catch {
@@ -268,62 +305,112 @@ public struct WhatsAppTools: ToolHandler {
     }
 
     private func mediaView(_ arguments: Arguments) async throws -> [ToolOutput.Block] {
-        let (message, attachment, url) = try await attachment(arguments)
-        func text(_ value: String) -> ToolOutput.Block { .text(value) }
-        guard let url else { return [text(format.mediaMissing(message, attachment: attachment))] }
+        let id = try arguments.requiredIdentifier("message_id", in: Configuration.identifierRange)
+        let frames = try arguments.int(
+            "frames", default: Configuration.defaultFrames, in: Configuration.frameRange)
+        let language = try arguments.optionalString("language")
+        let window = try arguments.window()
+        let firstPage = try arguments.int("first_page", default: 1, in: Configuration.pageNumberRange)
+        let lastPage = try arguments.int(
+            "last_page", default: Configuration.pageNumberRange.upperBound,
+            in: Configuration.pageNumberRange)
+        guard lastPage >= firstPage else {
+            throw ToolError.badArgument(
+                name: "last_page", reason: "it is before first_page; pages run from first_page to last_page")
+        }
 
-        let heading = format.mediaHeading(message, attachment: attachment)
+        let (message, attachment, url) = try await attachment(id: id)
+        guard let url else {
+            return [.text(format.mediaMissing(message, attachment: attachment, notices: arguments.notices))]
+        }
+
+        var clips = ClippedFields()
+        let heading = format.mediaHeading(message, attachment: attachment, clips: &clips)
+        var notices: [String] { arguments.notices + clips.notices(tool: ToolCatalog.messageGetName) }
         do {
             switch attachment.kind {
             case .photo, .sticker, .gif:
                 let jpeg = try MediaFiles.jpegData(of: url)
                 return [
+                    .text(ToolStandard.withNotices(notices, heading)),
                     .image(data: jpeg.base64EncodedString(), mimeType: "image/jpeg"),
-                    text(heading),
                 ]
 
             case .video:
-                let count = try arguments.int("frames", default: 4, in: 1...8)
-                let (frames, seconds) = try await MediaFiles.keyFrames(of: url, count: count)
-                var content: [ToolOutput.Block] = frames.map {
-                    .image(data: $0.base64EncodedString(), mimeType: "image/jpeg")
-                }
-                var summary = heading + "\n\(frames.count) frames, evenly spaced over \(Int(seconds.rounded())) s."
+                let (images, seconds) = try await MediaFiles.keyFrames(of: url, count: frames)
                 // Best effort and only when asked: the frames are the answer and the sound is
                 // an addition, so anything that goes wrong here is a note and never a failure.
                 // No language means no transcript, because macOS cannot detect one.
-                if let language = arguments.optionalString("language"), let transcription {
+                var transcript: Transcription?
+                var missingTranscript =
+                    "No transcript: pass 'language' (for example es-ES), or use audio_transcribe."
+                if let language, let transcription {
                     do {
-                        let result = try await transcription.transcribe(file: url, language: language)
-                        summary += "\n\n" + format.transcription(result, heading: nil)
+                        transcript = try await transcription.transcribe(file: url, language: language)
                     } catch let failure as TranscriptionError {
-                        summary += "\n\nNo transcript: "
+                        missingTranscript =
+                            "No transcript: "
                             + (failure.message.split(separator: "\n").first.map(String.init) ?? "unavailable")
                     } catch {
-                        summary += "\n\nNo transcript: \(error.localizedDescription)"
+                        missingTranscript = "No transcript: the sound could not be read."
                     }
-                } else {
-                    summary += "\nNo transcript: pass 'language' (for example es-ES), or use audio_transcribe."
                 }
-                content.append(text(summary))
-                return content
+                let summary = ToolStandard.fitting(window.maxCharacters) { size in
+                    var lines = [
+                        heading,
+                        "\(images.count) frames, evenly spaced over \(Int(seconds.rounded())) s. "
+                            + "Pass frames (up to \(Configuration.frameRange.upperBound)) for more.",
+                    ]
+                    var all = notices
+                    if let transcript {
+                        let part = format.transcriptWindow(
+                            transcript, characterOffset: window.characterOffset, maxCharacters: size)
+                        lines += ["", part.text]
+                        if let notice = part.notice { all.append(notice) }
+                    } else {
+                        lines.append(missingTranscript)
+                    }
+                    return ToolStandard.withNotices(all, lines.joined(separator: "\n"))
+                }
+                return [.text(summary)]
+                    + images.map { .image(data: $0.base64EncodedString(), mimeType: "image/jpeg") }
 
             case .document:
                 let mime = MediaFiles.mimeType(of: url)
                 if mime == "application/pdf" {
-                    return [text(heading + "\n\n" + format.documentText(try MediaFiles.pdfText(of: url), pdf: true))]
+                    let document = try MediaFiles.pdfText(of: url, firstPage: firstPage, lastPage: lastPage)
+                    return [
+                        .text(
+                            format.documentText(
+                                document, pdf: true, heading: heading,
+                                characterOffset: window.characterOffset,
+                                maxCharacters: window.maxCharacters, notices: notices))
+                    ]
                 }
                 if mime.hasPrefix("text/") {
-                    return [text(heading + "\n\n" + format.documentText(try MediaFiles.plainText(of: url), pdf: false))]
+                    return [
+                        .text(
+                            format.documentText(
+                                try MediaFiles.plainText(of: url), pdf: false, heading: heading,
+                                characterOffset: window.characterOffset,
+                                maxCharacters: window.maxCharacters, notices: notices))
+                    ]
                 }
                 return [
-                    text(
-                        heading + "\n\nNo viewer for \(mime): this server reads images, PDFs, text "
-                            + "and video frames. media_get gives the path and hash.")
+                    .text(
+                        ToolStandard.withNotices(
+                            notices,
+                            heading + "\n\nNo viewer for \(mime): this server reads images, PDFs, text "
+                                + "and video frames. media_get gives the path and hash."))
                 ]
 
             case .voiceNote, .audioFile:
-                return [text(heading + "\n\nAudio is not played here. Use audio_transcribe with this message id.")]
+                return [
+                    .text(
+                        ToolStandard.withNotices(
+                            notices,
+                            heading + "\n\nAudio is not played here. Use audio_transcribe with this message id."))
+                ]
             }
         } catch let failure as MediaFiles.ViewError {
             switch failure {
@@ -339,63 +426,88 @@ public struct WhatsAppTools: ToolHandler {
                     "This file is \(size) bytes, over the \(limit)-byte limit for viewing.")
             case .locked:
                 throw ToolError.mediaProblem("This PDF is password-protected; its text cannot be read.")
+            case .pastLastPage(let first, let count):
+                throw ToolError.badArgument(
+                    name: "first_page",
+                    reason: "this PDF has \(count) page(s), so first_page=\(first) is past its end")
             }
         }
     }
 
+    // MARK: Beyond the chat store
+
     private func domainTool(_ name: String, _ arguments: Arguments) throws -> String {
         guard let reader else { throw ToolError.explorerUnavailable }
-        let limit = try arguments.int(
-            "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
         do {
             switch name {
             case ToolCatalog.callsName:
                 var query = CallQuery()
-                query.after = try arguments.optionalDate("after")
-                query.before = try arguments.optionalDate("before")
-                if let after = query.after, let before = query.before, before < after {
-                    throw ToolError.rangeInverted
-                }
+                (query.from, query.before) = try arguments.dateRange()
                 query.newestFirst = try arguments.newestFirst()
-                query.limit = limit
-                query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
-                let (calls, source) = try reader.calls(matching: query)
-                return format.calls(calls, source: source, limit: limit, offset: query.offset)
+                (query.limit, query.offset) = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+                let (calls, total, source) = try reader.calls(matching: query)
+                return format.calls(
+                    calls, total: total, source: source, offset: query.offset,
+                    notices: arguments.notices)
 
             case ToolCatalog.locationSharingName:
-                let (sharing, source) = try reader.locationSharing(limit: limit)
-                return format.locationSharing(sharing, source: source, limit: limit)
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+                let (sharing, source) = try reader.locationSharing(
+                    limit: page.limit, offset: page.offset)
+                return format.locationSharing(
+                    sharing, source: source, offset: page.offset, notices: arguments.notices)
 
             case ToolCatalog.labelsName:
-                if let id = try arguments.optionalInt("label_id") {
-                    let (label, entities, source) = try reader.labeledEntities(
-                        labelID: id, limit: limit)
+                let labelID = try arguments.optionalIdentifier(
+                    "label_id", in: Configuration.labelIdentifierRange)
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+                if let id = labelID {
+                    let (label, entities, total, source) = try reader.labeledEntities(
+                        labelID: id, limit: page.limit, offset: page.offset)
                     guard let label else {
                         throw ToolError.badArgument(
                             name: "label_id", reason: "no label has id \(id); call labels_list without it")
                     }
-                    return format.labeledEntities(entities, label: label, source: source, limit: limit)
+                    return format.labeledEntities(
+                        entities, total: total, label: label, source: source, offset: page.offset,
+                        notices: arguments.notices)
                 }
                 let (labels, source) = try reader.labels()
-                return format.labels(labels, source: source)
+                return format.labels(
+                    labels, source: source, limit: page.limit, offset: page.offset,
+                    notices: arguments.notices)
 
             case ToolCatalog.addressBookName:
                 var query = AddressBookQuery()
-                query.name = arguments.optionalString("name")
-                query.limit = limit
-                query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
-                let (entries, source) = try reader.addressBook(matching: query)
-                return format.addressBook(entries, source: source, limit: limit, offset: query.offset)
+                query.name = try arguments.optionalString("name")
+                (query.limit, query.offset) = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+                let (entries, total, source) = try reader.addressBook(matching: query)
+                return format.addressBook(
+                    entries, total: total, source: source, offset: query.offset,
+                    notices: arguments.notices)
 
             case ToolCatalog.lidLookupName:
                 let value = try arguments.requiredString("value")
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
                 let (matches, sources, notes) = try reader.lidLookup(value)
-                return format.lidMatches(matches, value: value, sources: sources, notes: notes)
+                return format.lidMatches(
+                    matches, value: value, sources: sources, notes: notes, limit: page.limit,
+                    offset: page.offset, notices: arguments.notices)
 
             default:
-                let (channels, source) = try reader.channels(
-                    name: arguments.optionalString("name"), limit: limit)
-                return format.channels(channels, source: source, limit: limit)
+                let channelName = try arguments.optionalString("name")
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultLimit, limits: Configuration.limitRange)
+                let (channels, total, source) = try reader.channels(
+                    name: channelName, limit: page.limit, offset: page.offset)
+                return format.channels(
+                    channels, total: total, source: source, offset: page.offset,
+                    notices: arguments.notices)
             }
         } catch let failure as SourceError {
             throw failure.toolError
@@ -413,21 +525,31 @@ public struct WhatsAppTools: ToolHandler {
         do {
             switch name {
             case ToolCatalog.dbTablesName:
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultTableLimit, limits: Configuration.tableLimitRange)
                 let (entries, source) = try explorer.tables(in: database)
-                return format.databaseTables(entries, source: source)
+                return format.databaseTables(
+                    entries, source: source, limit: page.limit, offset: page.offset,
+                    notices: arguments.notices)
 
             case ToolCatalog.dbSchemaName:
-                let (statements, source) = try explorer.schema(
-                    of: database, table: arguments.optionalString("table"))
-                return format.databaseSchema(statements, source: source)
+                let table = try arguments.optionalString("table")
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultSchemaLimit, limits: Configuration.schemaLimitRange)
+                let (statements, source) = try explorer.schema(of: database, table: table)
+                return format.databaseSchema(
+                    statements, source: source, limit: page.limit, offset: page.offset,
+                    notices: arguments.notices)
 
             default:
-                let limit = try arguments.int(
-                    "limit", default: LiveDatabaseExplorer.defaultRowLimit,
-                    in: LiveDatabaseExplorer.rowLimitRange)
+                let sql = try arguments.requiredString("sql")
+                let page = try arguments.page(
+                    defaultLimit: Configuration.defaultQueryLimit, limits: Configuration.queryLimitRange)
                 let result = try explorer.select(
-                    try arguments.requiredString("sql"), in: database, limit: limit)
-                return format.queryResult(result, limit: limit)
+                    sql, in: database, limit: page.limit, offset: page.offset,
+                    maxCharacters: arguments.isGiven("limit")
+                        ? Configuration.longestQueryCharacters : Configuration.queryCharacters)
+                return format.queryResult(result, offset: page.offset, notices: arguments.notices)
             }
         } catch let refusal as ReadOnlyDatabase.SelectRefusal {
             throw ToolError.queryRefused(refusal.detail)
@@ -438,40 +560,18 @@ public struct WhatsAppTools: ToolHandler {
         }
     }
 
-    private func group(_ arguments: Arguments) async throws -> String {
-        let id = try arguments.requiredInt("chat_id")
-        guard let summary = try await store.chat(id: id) else {
-            throw ToolError.chatNotFound(id: id)
-        }
-        guard summary.kind == .group else {
-            throw ToolError.notAGroup(id: id, kind: summary.kind)
-        }
-        guard let group = try await store.group(chatID: id) else {
-            throw ToolError.storeFailure(
-                "chat \(id) is a group but has no ZWAGROUPINFO row — the database may be "
-                    + "mid-sync; try again after opening WhatsApp")
-        }
-        return format.group(group, chat: summary)
-    }
-
     /// The filters `chat_get`, `whatsapp_search` and `media_list` share.
     ///
     /// Each mirrors a column the store already holds. Nothing here is derived, ranked or
     /// scored: the rows go up as they are and the reading of them happens above.
     private func messageQuery(_ arguments: Arguments) throws -> MessageQuery {
         var query = MessageQuery()
-        query.after = try arguments.optionalDate("after")
-        query.before = try arguments.optionalDate("before")
+        (query.from, query.before) = try arguments.dateRange()
         query.fromMe = try arguments.optionalBool("from_me")
         query.starredOnly = try arguments.bool("starred_only")
         query.newestFirst = try arguments.newestFirst()
-        query.limit = try arguments.int(
-            "limit", default: Configuration.pageSize, in: Configuration.pageSizeRange)
-        query.offset = try arguments.int("offset", default: 0, in: Configuration.offsetRange)
-
-        if let after = query.after, let before = query.before, before < after {
-            throw ToolError.rangeInverted
-        }
+        (query.limit, query.offset) = try arguments.page(
+            defaultLimit: Configuration.defaultMessageLimit, limits: Configuration.messageLimitRange)
         return query
     }
 

@@ -2,6 +2,9 @@ import Foundation
 
 public enum ToolError: Error, Equatable {
     case storeUnavailable(StoreAvailability)
+    case unknownTool(String)
+    case unknownArgument(name: String, tool: String, allowed: [String])
+    case timedOut(seconds: Int)
     case missingArgument(String)
     case badArgument(name: String, reason: String)
     case badDate(argument: String, value: String)
@@ -23,6 +26,25 @@ public enum ToolError: Error, Equatable {
         case .storeUnavailable(let availability):
             return Self.availabilityMessage(availability)
 
+        case .unknownTool(let name):
+            return "'\(ToolStandard.echo(name))' is not a tool of this server."
+
+        case .unknownArgument(let name, let tool, let allowed):
+            let takes =
+                allowed.isEmpty ? "It takes no arguments." : "It takes: \(allowed.joined(separator: ", "))."
+            return "'\(ToolStandard.echo(name))' is not an argument of \(tool). \(takes)"
+
+        case .timedOut(let seconds):
+            return """
+                The call did not finish within \(seconds) seconds and was abandoned. This \
+                server only reads, so nothing was changed.
+
+                Ask for less: a narrower from_date and to_date, a filter, a lower limit, or \
+                a narrower db_query statement. A transcription takes longer the longer the \
+                recording is, and the recording cannot be cut from here: a voice note too long \
+                to recognise inside this limit cannot be transcribed by this server.
+                """
+
         case .missingArgument(let name):
             return "Missing required argument '\(name)'."
 
@@ -31,14 +53,14 @@ public enum ToolError: Error, Equatable {
 
         case .badDate(let argument, let value):
             return """
-                Argument '\(argument)' is not a date this server accepts: '\(value)'
+                Argument '\(argument)' is not a date this server accepts: '\(ToolStandard.echo(value))'
 
                 Use one of:
                 \(DateParsing.acceptedForms)
                 """
 
         case .rangeInverted:
-            return "'before' is earlier than 'after'. Nothing can match a range that runs backwards."
+            return "'to_date' is earlier than 'from_date'. Nothing can match a range that runs backwards."
 
         case .chatNotFound(let id):
             return """
@@ -69,14 +91,14 @@ public enum ToolError: Error, Equatable {
                 """
 
         case .storeFailure(let detail):
-            return "WhatsApp's database returned an error: \(detail)"
+            return "WhatsApp's database returned an error: \(Self.clipped(detail))"
 
         case .accessDenied(let path):
             return Self.accessDeniedMessage(path)
 
         case .databaseNotAllowed(let name):
             return """
-                '\(name)' is not a database this server reads.
+                '\(ToolStandard.echo(name))' is not a database this server reads.
 
                 Choose one of: \(AllowedDatabase.allCases.map(\.rawValue).joined(separator: ", ")).
                 The list is fixed on purpose: WhatsApp's container also holds encryption
@@ -84,7 +106,7 @@ public enum ToolError: Error, Equatable {
                 """
 
         case .queryRefused(let detail):
-            return "db_query refused the statement: \(detail)."
+            return "db_query refused the statement: \(Self.clipped(detail))."
 
         case .noAttachment(let id):
             return """
@@ -96,11 +118,18 @@ public enum ToolError: Error, Equatable {
                 """
 
         case .mediaProblem(let detail):
-            return detail
+            return Self.clipped(detail)
 
         case .explorerUnavailable:
             return "The database tools are not configured in this server."
         }
+    }
+
+    /// Another program's text (SQLite's, ffmpeg's) can quote a statement or a path at any
+    /// length; an error repeats only its start.
+    static func clipped(_ detail: String) -> String {
+        detail.count > Configuration.errorDetailWidth
+            ? String(detail.prefix(Configuration.errorDetailWidth)) + "…" : detail
     }
 
     /// The fix for a refusal, in the order a person does it. The part about updates is not
@@ -150,7 +179,7 @@ public enum ToolError: Error, Equatable {
 
         case .databaseUnreadable(let path, let detail):
             return """
-                WhatsApp's chat database could not be opened: \(detail)
+                WhatsApp's chat database could not be opened: \(Self.clipped(detail))
 
                   \(path)
 

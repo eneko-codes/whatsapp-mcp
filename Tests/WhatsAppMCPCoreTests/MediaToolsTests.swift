@@ -298,7 +298,7 @@ struct MediaToolsTests {
         #expect(texts(second).contains("no text layer"))
     }
 
-    @Test("A text document returns its text, cut at the limit with a note")
+    @Test("A text document returns its text through a window that continues where it ended")
     func textDocument() async throws {
         let fixture = try MediaFixture()
         defer { fixture.remove() }
@@ -307,10 +307,18 @@ struct MediaToolsTests {
         let (content, _) = await contents(
             fixture.tools(store), ToolCatalog.mediaViewName, ["message_id": .int(10)])
         #expect(texts(content).contains("invented notes"))
+        #expect(!texts(content).contains("characters"))
 
-        let long = try MediaFiles.plainText(of: URL(fileURLWithPath: path), maxCharacters: 5)
-        #expect(long.truncated)
-        #expect(long.text == "inven")
+        let (first, _) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "max_characters": .int(5)])
+        #expect(texts(first).hasPrefix("Document text: characters 1–5 of 15. Pass character_offset=5 for the rest."))
+        #expect(texts(first).hasSuffix("inven"))
+        let (rest, _) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "character_offset": .int(5)])
+        #expect(texts(rest).hasPrefix("Document text: characters 6–15 of 15. That is all."))
+        #expect(texts(rest).hasSuffix("ted notes\n"))
     }
 
     @Test("A document of a kind this server cannot read says so and points to media_get")
@@ -339,6 +347,53 @@ struct MediaToolsTests {
         #expect(!isError, Comment(rawValue: texts(content)))
         #expect(images(content).count == 3)
         #expect(texts(content).contains("3 frames"))
+    }
+
+    @Test("frames at its ends is used as asked; one past either end is moved and reported")
+    func frameBounds() async throws {
+        let fixture = try MediaFixture()
+        defer { fixture.remove() }
+        let url = fixture.media.appendingPathComponent("clip.mp4")
+        try await makeVideo(at: url)
+        let store = fixture.store([(10, Fixtures.attachment(.video, path: url.path), nil)])
+        let range = Configuration.frameRange
+
+        for (asked, used) in [
+            (range.upperBound, range.upperBound), (range.upperBound + 1, range.upperBound),
+            (range.lowerBound, range.lowerBound), (range.lowerBound - 1, range.lowerBound),
+        ] {
+            let (content, isError) = await contents(
+                fixture.tools(store), ToolCatalog.mediaViewName,
+                ["message_id": .int(10), "frames": .int(asked)])
+            #expect(!isError, Comment(rawValue: texts(content)))
+            #expect(images(content).count == used, "frames=\(asked)")
+            let notice = "frames=\(asked) is outside \(range.lowerBound)–\(range.upperBound); \(used) was used."
+            #expect(texts(content).hasPrefix(notice) == (asked != used), Comment(rawValue: texts(content)))
+        }
+        let (defaulted, _) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName, ["message_id": .int(10)])
+        #expect(images(defaulted).count == Configuration.defaultFrames)
+    }
+
+    @Test("A page number outside its range is moved and reported")
+    func pageNumberBounds() async throws {
+        let fixture = try MediaFixture()
+        defer { fixture.remove() }
+        let path = try fixture.file("long.pdf", makePDF(text: nil, pages: 3))
+        let store = fixture.store([(10, Fixtures.attachment(.document, path: path), nil)])
+        let range = Configuration.pageNumberRange
+        let (content, isError) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "first_page": .int(0), "last_page": .int(range.upperBound + 1)])
+        #expect(!isError)
+        #expect(
+            texts(content).hasPrefix(
+                """
+                first_page=0 is outside 1–\(range.upperBound); 1 was used.
+                last_page=\(range.upperBound + 1) is outside 1–\(range.upperBound); \(range.upperBound) was used.
+
+                """), Comment(rawValue: texts(content)))
+        #expect(texts(content).contains("Page 3 text"))
     }
 
     @Test("A voice note is not played; the answer points to audio_transcribe")
@@ -375,17 +430,31 @@ struct MediaToolsTests {
         }
     }
 
-    @Test("A long PDF stops extracting at the limit and says it was cut")
-    func longPDFIsCutEarly() throws {
+    @Test("A long PDF is read by its pages, and a first page past the end is refused")
+    func longPDFIsReadByPage() async throws {
         let fixture = try MediaFixture()
         defer { fixture.remove() }
         let path = try fixture.file("long.pdf", makePDF(text: nil, pages: 40))
-        let result = try MediaFiles.pdfText(of: URL(fileURLWithPath: path), maxCharacters: 30)
+        let result = try MediaFiles.pdfText(of: URL(fileURLWithPath: path), firstPage: 3, lastPage: 4)
         #expect(result.pageCount == 40)
-        #expect(result.truncated)
-        #expect(result.text.count <= 30)
-        #expect(result.text.contains("Page 1"))
-        #expect(!result.text.contains("Page 40"))
+        #expect(result.pages == 3...4)
+        #expect(result.text.contains("--- page 3 ---") && result.text.contains("Page 4"))
+        #expect(!result.text.contains("Page 2 ") && !result.text.contains("Page 5"))
+
+        let store = fixture.store([(10, Fixtures.attachment(.document, path: path), nil)])
+        let (pages, _) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "first_page": .int(39), "last_page": .int(500)])
+        #expect(texts(pages).contains("PDF, 40 page(s); pages 39–40 below"))
+        let (past, pastError) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "first_page": .int(41)])
+        #expect(pastError)
+        #expect(texts(past).contains("40 page(s)"))
+        let (backwards, backwardsError) = await contents(
+            fixture.tools(store), ToolCatalog.mediaViewName,
+            ["message_id": .int(10), "first_page": .int(5), "last_page": .int(4)])
+        #expect(backwardsError, Comment(rawValue: texts(backwards)))
     }
 
     @Test("Something that is not a regular file is refused instead of blocking on it")

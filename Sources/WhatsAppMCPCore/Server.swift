@@ -3,74 +3,62 @@ import Foundation
 public enum WhatsAppMCPServer {
 
     public static let name = "whatsapp-mcp"
-    public static let version = "1.5.2"
+    public static let version = "2.0.0"
 
     /// Returned from `initialize`. It carries what per-tool descriptions cannot state
     /// once: that this server never changes WhatsApp and keeps nothing, that
     /// the schema is undocumented, and what WhatsApp simply does not keep on this Mac.
     public static let instructions = """
         Read access to WhatsApp on this Mac. This server never changes WhatsApp's data: it \
-        cannot write, delete or send a message, and has no route to WhatsApp's network or to \
-        any other network. Reading a database in WAL mode does update that database's \
-        -shm index file, which SQLite uses to coordinate readers with the writer; it holds \
-        no messages. On recent macOS, reading \
-        WhatsApp's container needs Full Disk Access for this server's program, and a copy \
-        signed ad hoc needs it again after every rebuild or update. whatsapp_status says whether macOS allowed \
-        the read (and, if it refused, the exact steps), whether the chat database is \
-        present, and the shape the queries expect. If a tool says macOS refused access to \
-        WhatsApp's data folder (ACCESS DENIED in whatsapp_status), give the person those \
-        steps; it is not a missing file.
-
-        It keeps nothing. The only file it makes is a scratch directory for converting \
-        audio, in ~/Library/Caches/whatsapp-mcp, deleted when the call ends; transcripts \
-        and database content are never stored — every database is read live, and a \
-        transcript exists only in the answer. db_query can read only the tables a \
-        database itself declares, and never key material.
-
-        THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's private \
-        storage, undocumented and free to change in any update. If a tool reports a missing \
-        table or column, the reads are wrong and not merely empty — say so rather than \
-        reporting that someone has no messages, calls or contacts.
-
-        The newest messages are included: the databases are read through WhatsApp's \
-        write-ahead log. A message WhatsApp has not committed yet is not visible, and \
-        every answer from a database other than the chat store says when it was read.
+        cannot write, delete or send a message, and has no route to any network. Ids are \
+        row ids in the local database, not WhatsApp identifiers: look them up again rather \
+        than reusing one from an earlier conversation.
 
         Workflow: chats_list to see what exists, chat_get for one conversation, \
-        whatsapp_search across all of them (with starred_only=true and no phrase it lists \
-        every starred message), message_get to open one message up — it shows the message \
-        a reply quotes and who reacted with which emoji — media_list for what was shared \
-        rather than said, group_get for a group's roster. To open an \
-        attachment: media_get for the file's facts, media_view to see a photo, read a PDF or \
-        see a video's frames, audio_transcribe for sound. Beyond messages: calls_list, \
-        location_sharing_list, labels_list, address_book_list, channels_list and \
-        lid_lookup. db_tables, db_schema and db_query read any other WhatsApp database \
-        directly — one SELECT, rows capped, call db_schema first because column names are \
-        WhatsApp's. Key material and raw protocol queues are refused. Ids are row ids in \
-        the local database — they are not WhatsApp identifiers and do not survive a \
-        reinstall, so look them up again rather than reusing one from earlier.
+        whatsapp_search across all of them (starred_only=true with no phrase lists every \
+        starred message), message_get to open one message whole — the message a reply \
+        quotes and who reacted with which emoji — media_list for what was shared rather \
+        than said, group_get for a group's members. To open an attachment: media_get for \
+        the file's facts, media_view to see a photo, read a PDF or see a video's frames, \
+        audio_transcribe for sound. Beyond messages: calls_list, location_sharing_list, \
+        labels_list, address_book_list, channels_list and lid_lookup. db_tables, db_schema \
+        and db_query read any other WhatsApp database: one SELECT, and call db_schema first \
+        because column names are WhatsApp's. Key material is refused.
 
-        TRANSCRIPTS ARE AUTOMATIC. audio_transcribe uses the speech recognition built into \
-        macOS, on this Mac, and can be wrong. It needs the language spoken, as a full tag \
-        (es-ES, en-US; a bare language only when it has a single model): macOS cannot detect it, and Basque (eu) and Catalan (ca) were not in its list when \
-        this was written — the tool says what the engine offers rather than guessing in \
-        another language. macOS 27 opens \
-        WhatsApp's Ogg Opus voice notes, MP3 and M4A itself; a video's sound track, containers \
-        it cannot open (Matroska, for one) and, on older macOS, possibly voice notes need \
-        ffmpeg installed.
+        EVERY ANSWER IS BOUNDED, and its first lines say what it left out and the exact \
+        arguments that return the rest. Listings come \(Configuration.defaultLimit) rows to \
+        a page (messages \(Configuration.defaultMessageLimit)): pass limit and offset. A \
+        row clips a message's text to \(Configuration.textWidth) characters; message_get \
+        has it whole. A long text (one message, a document, a transcript) comes \
+        \(Configuration.defaultMaxCharacters) characters at a time: pass character_offset \
+        and max_characters. Dates: from_date and to_date, both inclusive.
 
-        WHAT IS NOT IN THE CHAT DATABASE, and is absent from WhatsApp's own storage rather \
-        than missed by these tools: a mapping from a …@lid address to a phone number there \
-        (other databases have pairing tables, which lid_lookup reads, and whose coverage is \
-        not measured); any disappearing-message setting or TTL; the text of a message \
-        deleted for everyone, which WhatsApp clears in place with no second copy and no link \
-        to what it replaced; and any meaning for a delivery code, which is stored as a \
-        number nobody has matched to sent, delivered or read; and who starred a message or \
-        when, since a star is only a yes/no flag. Say so plainly rather than \
-        implying the data might be found another way.
+        If a tool says macOS refused access to WhatsApp's data folder (ACCESS DENIED in \
+        whatsapp_status), it is not a missing file: this server's program needs Full Disk \
+        Access, and a copy signed ad hoc needs it again after every rebuild or update. \
+        whatsapp_status gives the steps; pass them on.
 
-        WhatsApp status updates are not covered: the structure of that database could not \
-        be verified, so there is no tool for them. db_query can reach it.
+        THE SHAPE OF WHATSAPP'S DATA IS NOT A CONTRACT. The databases are WhatsApp's \
+        private, undocumented storage. If a tool reports a missing table or column, the \
+        reads are wrong, not empty — say so rather than reporting that someone has no \
+        messages, calls or contacts. The newest messages are included, through the \
+        write-ahead log; reading updates only SQLite's -shm index file, which holds no \
+        messages.
+
+        It keeps nothing: the only file it makes is a scratch folder for converting audio, \
+        in ~/Library/Caches/whatsapp-mcp, deleted when the call ends.
+
+        TRANSCRIPTS ARE AUTOMATIC and can be wrong. audio_transcribe needs the language \
+        spoken as a full tag (es-ES, en-US): macOS cannot detect it, and Basque (eu) and \
+        Catalan (ca) were not in its list when this was written. A video's sound track and \
+        containers macOS cannot open need ffmpeg installed.
+
+        NOT IN WHATSAPP'S STORAGE at all, rather than missed by these tools: a phone number \
+        for a …@lid address in the chat database (lid_lookup reads other pairing tables, of \
+        unmeasured coverage); any disappearing-message setting; the text of a message \
+        deleted for everyone; any meaning for a delivery code, stored as a bare number; and \
+        who starred a message or when. Say so plainly. Status updates have no tool: their \
+        database could not be verified; db_query can reach it.
         """
 
     /// The store is a parameter so the whole server can be driven by a double. Nothing in

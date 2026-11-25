@@ -91,22 +91,39 @@ public struct SystemWhatsAppStore: WhatsAppStore {
 
     // MARK: Chats
 
-    public func chats(matching query: ChatQuery) async throws -> [Chat] {
+    public func chats(matching query: ChatQuery) async throws -> ChatPage {
         let database = try open()
         let hidden = try Self.hiddenColumn(database)
-        var clauses: [String] = []
-        var bindings: [SQLiteBinding] = []
 
-        if !query.includeArchived { clauses.append("s.ZARCHIVED = 0") }
-        if !query.includeHidden, hidden != nil { clauses.append("s.ZHIDDEN = 0") }
+        // The filters the caller chose, then the two that hold rows back unless asked. Each
+        // held-back count is what the other filters match with only that one flag turned
+        // round, so "12 archived chats are not shown" is true on its own.
+        var chosen: [String] = []
+        var bindings: [SQLiteBinding] = []
         if let name = query.name {
-            clauses.append("wa_contains(COALESCE(s.ZPARTNERNAME, s.ZCONTACTJID), ?)")
+            chosen.append("wa_contains(COALESCE(s.ZPARTNERNAME, s.ZCONTACTJID), ?)")
             bindings.append(.text(name))
         }
         if !query.kinds.isEmpty {
             let codes = query.kinds.map { String($0.sessionTypeCode) }.joined(separator: ", ")
-            clauses.append("s.ZSESSIONTYPE IN (\(codes))")
+            chosen.append("s.ZSESSIONTYPE IN (\(codes))")
         }
+        let archivedClause = query.includeArchived ? nil : "s.ZARCHIVED = 0"
+        let hiddenClause = (!query.includeHidden && hidden != nil) ? "s.ZHIDDEN = 0" : nil
+        let clauses = chosen + [archivedClause, hiddenClause].compactMap { $0 }
+
+        func count(_ clauses: [String]) throws -> Int {
+            try Self.count(
+                database, "SELECT COUNT(*) FROM ZWACHATSESSION s \(Self.whereClause(clauses))",
+                bindings)
+        }
+        let total = try count(clauses)
+        let archivedNotShown =
+            archivedClause == nil
+            ? 0 : try count(chosen + ["s.ZARCHIVED != 0"] + [hiddenClause].compactMap { $0 })
+        let hiddenNotShown =
+            hiddenClause == nil
+            ? 0 : try count(chosen + [archivedClause].compactMap { $0 } + ["s.ZHIDDEN != 0"])
 
         let sql = """
             \(Self.chatColumns(hidden: hidden))
@@ -115,12 +132,13 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             ORDER BY s.ZLASTMESSAGEDATE DESC, s.Z_PK DESC
             LIMIT ? OFFSET ?
             """
-        bindings.append(.int(Int64(query.limit)))
-        bindings.append(.int(Int64(query.offset)))
-
         var chats: [Chat] = []
-        try database.query(sql, bindings) { row in chats.append(Self.chat(from: row)) }
-        return chats
+        try database.query(
+            sql, bindings + [.int(Int64(query.limit)), .int(Int64(query.offset))]
+        ) { row in chats.append(Self.chat(from: row)) }
+        return ChatPage(
+            rows: chats, total: total, archivedNotShown: archivedNotShown,
+            hiddenNotShown: hiddenNotShown)
     }
 
     public func chat(id: Int64) async throws -> Chat? {
@@ -669,7 +687,7 @@ public struct SystemWhatsAppStore: WhatsAppStore {
         var members: [GroupMember] = []
         if presentMembers.contains("ZMEMBERJID") {
             let sql =
-                "SELECT \(presentMembers.joined(separator: ", ")) FROM ZWAGROUPMEMBER WHERE ZCHATSESSION = ?"
+                "SELECT \(presentMembers.joined(separator: ", ")) FROM ZWAGROUPMEMBER WHERE ZCHATSESSION = ? ORDER BY Z_PK"
             try database.query(sql, [.int(chatID)]) { row in
                 var jid: String?
                 // ZCONTACTNAME is an empty string on every row of the measured library,
@@ -737,9 +755,9 @@ public struct SystemWhatsAppStore: WhatsAppStore {
             clauses.append("wa_contains(m.ZTEXT, ?)")
             bindings.append(.text(text))
         }
-        if let after = query.after {
+        if let from = query.from {
             clauses.append("\(messageDate) >= ?")
-            bindings.append(.double(after.timeIntervalSinceReferenceDate))
+            bindings.append(.double(from.timeIntervalSinceReferenceDate))
         }
         if let before = query.before {
             clauses.append("\(messageDate) < ?")

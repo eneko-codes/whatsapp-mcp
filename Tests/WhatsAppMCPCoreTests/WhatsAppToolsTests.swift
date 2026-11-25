@@ -232,14 +232,34 @@ struct WhatsAppToolsTests {
         let (_, isError) = await call(
             ToolCatalog.searchName,
             [
-                "query": .string("bread"), "after": .string("2026-08-01"),
-                "before": .string("2026-08-10"), "starred_only": .bool(true),
+                "query": .string("bread"), "from_date": .string("2026-08-01"),
+                "to_date": .string("2026-08-10"), "starred_only": .bool(true),
             ],
             store: store)
         #expect(!isError)
         #expect(store.lastMessageQuery?.text == "bread")
         #expect(store.lastMessageQuery?.starredOnly == true)
-        #expect(store.lastMessageQuery?.after != nil)
+        #expect(store.lastMessageQuery?.from == Fixtures.date(2026, 8, 1))
+        // to_date covers the whole of its day.
+        #expect(store.lastMessageQuery?.before == Fixtures.date(2026, 8, 11))
+    }
+
+    /// After a rename, a caller still sending the old name must hear about it: ignored, the
+    /// search would run over every date and read as an answer about the dates asked for.
+    @Test("An argument the tool does not take is refused, naming the ones it does")
+    func unknownArgumentIsRefused() async {
+        for old in ["after", "before"] {
+            let (text, isError) = await call(
+                ToolCatalog.searchName, ["query": .string("bread"), old: .string("2026-08-01")],
+                store: stocked())
+            #expect(isError)
+            #expect(text.hasPrefix("'\(old)' is not an argument of whatsapp_search."), Comment(rawValue: text))
+            #expect(text.contains("from_date") && text.contains("to_date"))
+        }
+        let (status, statusError) = await call(
+            ToolCatalog.statusName, ["verbose": .bool(true)], store: stocked())
+        #expect(statusError)
+        #expect(status.contains("It takes no arguments."))
     }
 
     @Test("whatsapp_search narrows to a chat when chat_id arrives as a number")
@@ -281,7 +301,8 @@ struct WhatsAppToolsTests {
     func invertedRangeIsRefused() async {
         let (_, isError) = await call(
             ToolCatalog.searchName,
-            ["after": .string("2026-08-10"), "before": .string("2026-08-01")], store: stocked())
+            ["query": .string("bread"), "from_date": .string("2026-08-10"), "to_date": .string("2026-08-01")],
+            store: stocked())
         #expect(isError)
     }
 

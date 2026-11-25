@@ -2,108 +2,72 @@ import Foundation
 
 /// Typed access to a `tools/call` argument bag.
 ///
-/// Nothing here has a "clear this field" affordance, unlike the sibling servers: every
-/// tool on this server is a read, so no argument ever names a field to be emptied. An
-/// absent key simply means the filter is not applied.
-public struct Arguments {
+/// A class, not a struct, so that reading a quantity can also record that it was moved into
+/// its range without every reader having to be `mutating`. One instance serves one call and
+/// never leaves it. The tool puts `notices` before the data.
+///
+/// Every tool on this server is a read, so no argument ever names a field to be emptied: an
+/// absent argument, or JSON null, simply means the filter is not applied. A value of the
+/// wrong type is refused with the form expected, never read as absent, because a filter
+/// that is quietly dropped widens the answer and nothing in it says so.
+public final class Arguments {
     private let values: [String: Value]
     private let calendar: Calendar
+
+    /// One sentence for each quantity that was moved into its range, in the order read.
+    public private(set) var notices: [String] = []
 
     public init(_ values: [String: Value]?, calendar: Calendar) {
         self.values = values ?? [:]
         self.calendar = calendar
     }
 
-    // MARK: Scalars
-
-    public func requiredString(_ name: String) throws -> String {
-        guard let raw = values[name]?.stringValue else { throw ToolError.missingArgument(name) }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw ToolError.badArgument(name: name, reason: "it is empty")
+    /// Refuses a name the tool's schema does not list. Without it a caller still using a
+    /// renamed argument (`after`, `before`) would run an unfiltered call and read the answer
+    /// as filtered.
+    public func refuseUnknown(tool: String, allowed: [String]) throws {
+        guard let stray = values.keys.sorted().first(where: { !allowed.contains($0) }) else {
+            return
         }
-        return trimmed
+        throw ToolError.unknownArgument(name: stray, tool: tool, allowed: allowed.sorted())
     }
 
-    public func optionalString(_ name: String) -> String? {
-        guard let text = values[name]?.stringValue else { return nil }
+    /// Whether the caller gave `name` at all, null counting as not given.
+    public func isGiven(_ name: String) -> Bool { given(name) != nil }
+
+    /// `nil` when the argument is absent or null, which mean the same: not given.
+    private func given(_ name: String) -> Value? {
+        guard let raw = values[name], !raw.isNull else { return nil }
+        return raw
+    }
+
+    // MARK: Text
+
+    public func requiredString(_ name: String) throws -> String {
+        guard let text = try optionalString(name) else {
+            throw ToolError.missingArgument(name)
+        }
+        return text
+    }
+
+    /// Empty or blank text is "not given", as JSON null is.
+    public func optionalString(_ name: String) throws -> String? {
+        guard let raw = given(name) else { return nil }
+        guard let text = raw.stringValue else {
+            throw ToolError.badArgument(name: name, reason: "text was expected")
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// A filter that is present but not a boolean is an error, never "not applied": the
-    /// answer to `from_me: "yes"` that quietly ignores it is every message from both sides,
-    /// and nothing in it says the filter was dropped. The strings "true" and "false" are
-    /// accepted, for the same reason numeric ids are — a client that serialises everything
-    /// as text should not be punished for it.
-    public func bool(_ name: String, default fallback: Bool = false) throws -> Bool {
-        try optionalBool(name) ?? fallback
-    }
-
-    /// Nil when absent, which is what separates "only messages I sent" from "any
-    /// message". A tri-state has to stay a tri-state.
-    public func optionalBool(_ name: String) throws -> Bool? {
-        // JSON null is how a client says "not set"; an empty or blank string is not — it is
-        // a filter that was meant and got lost, and dropping it widens the answer.
-        guard let raw = values[name], raw != .null else { return nil }
-        if let flag = raw.boolValue { return flag }
-        if let text = raw.stringValue {
-            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            case "true": return true
-            case "false": return false
-            default: break
-            }
-        }
-        throw ToolError.badArgument(name: name, reason: "true or false was expected")
-    }
-
-    public func requiredInt(_ name: String) throws -> Int64 {
-        guard let raw = values[name] else { throw ToolError.missingArgument(name) }
-        if let number = raw.intValue { return Int64(number) }
-        // Ids travel through JSON and come back as strings often enough that rejecting
-        // "42" would be a pointless round trip.
-        if let text = raw.stringValue, let number = Int64(text) { return number }
-        throw ToolError.badArgument(name: name, reason: "an integer id was expected")
-    }
-
-    /// Nil when absent, for an id that narrows a search rather than naming its subject.
-    ///
-    /// Accepts a number or a numeric string for the same reason `requiredInt` does. Reading
-    /// such an id as a string only would silently drop it — the schema declares these as
-    /// numbers, so the filter would never be applied and the answer would look like an
-    /// unfiltered search that simply found more than expected.
-    public func optionalInt(_ name: String) throws -> Int64? {
-        guard let raw = values[name] else { return nil }
-        if let number = raw.intValue { return Int64(number) }
-        if let text = raw.stringValue {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty { return nil }
-            if let number = Int64(trimmed) { return number }
-        }
-        throw ToolError.badArgument(name: name, reason: "an integer id was expected")
-    }
-
-    /// Clamps rather than rejects: a model asking for 500 results means "as many as you
-    /// will give me".
-    public func int(_ name: String, default fallback: Int, in range: ClosedRange<Int>) throws
-        -> Int
-    {
-        guard let raw = values[name] else { return fallback }
-        guard let number = raw.intValue else {
-            throw ToolError.badArgument(name: name, reason: "an integer was expected")
-        }
-        return Swift.min(Swift.max(number, range.lowerBound), range.upperBound)
-    }
-
     public func stringArray(_ name: String) throws -> [String] {
-        guard let raw = values[name] else { return [] }
-        if case .null = raw { return [] }
+        guard let raw = given(name) else { return [] }
         // A single string where an array is expected is a common and harmless slip.
         if let single = raw.stringValue {
             let trimmed = single.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? [] : [trimmed]
         }
-        guard let entries = raw.arrayValue else {
+        guard let entries = raw.arrayValue, entries.allSatisfy({ $0.stringValue != nil }) else {
             throw ToolError.badArgument(name: name, reason: "an array of strings was expected")
         }
         return entries.compactMap(\.stringValue)
@@ -111,14 +75,98 @@ public struct Arguments {
             .filter { !$0.isEmpty }
     }
 
+    // MARK: Flags
+
+    public func bool(_ name: String, default fallback: Bool = false) throws -> Bool {
+        try optionalBool(name) ?? fallback
+    }
+
+    /// Nil when absent, which is what separates "only messages I sent" from "any
+    /// message". A tri-state has to stay a tri-state.
+    public func optionalBool(_ name: String) throws -> Bool? {
+        guard let raw = given(name) else { return nil }
+        guard let flag = raw.boolValue else {
+            throw ToolError.badArgument(name: name, reason: "true or false was expected")
+        }
+        return flag
+    }
+
+    // MARK: Numbers
+
+    private func wholeNumber(_ name: String) throws -> Int? {
+        guard let raw = given(name) else { return nil }
+        guard let number = raw.intValue else {
+            throw ToolError.badArgument(name: name, reason: "a whole number was expected")
+        }
+        return number
+    }
+
+    /// An identifier: a chat, message or label id. Outside its range it is refused, not
+    /// moved, because the nearest allowed value would name something else than what was
+    /// asked for.
+    public func optionalIdentifier(_ name: String, in range: ClosedRange<Int>) throws -> Int64? {
+        guard let raw = given(name) else { return nil }
+        guard let number = raw.intValue, range.contains(number) else {
+            throw ToolError.badArgument(
+                name: name,
+                reason:
+                    "an id, a whole number from \(range.lowerBound) to \(range.upperBound), was expected")
+        }
+        return Int64(number)
+    }
+
+    public func requiredIdentifier(_ name: String, in range: ClosedRange<Int>) throws -> Int64 {
+        guard let number = try optionalIdentifier(name, in: range) else {
+            throw ToolError.missingArgument(name)
+        }
+        return number
+    }
+
+    /// A quantity: a page size, a count to skip, a window. Outside its range it is moved to
+    /// the nearest allowed value, and `notices` gains the sentence that says which was used.
+    public func int(_ name: String, default fallback: Int, in range: ClosedRange<Int>) throws
+        -> Int
+    {
+        guard let number = try wholeNumber(name) else { return fallback }
+        return ToolStandard.clamp(number, to: range, argument: name, notices: &notices)
+    }
+
+    /// The `limit` and `offset` of a listing, read the same way by every tool that pages.
+    public func page(defaultLimit: Int, limits: ClosedRange<Int>) throws -> (limit: Int, offset: Int) {
+        (
+            try int("limit", default: defaultLimit, in: limits),
+            try int("offset", default: 0, in: Configuration.offsetRange)
+        )
+    }
+
+    /// The `character_offset` and `max_characters` of a window on one long text.
+    public func window() throws -> (characterOffset: Int, maxCharacters: Int) {
+        (
+            try int("character_offset", default: 0, in: Configuration.offsetRange),
+            try int(
+                "max_characters", default: Configuration.defaultMaxCharacters,
+                in: Configuration.maxCharactersRange)
+        )
+    }
+
     // MARK: Dates
 
-    public func optionalDate(_ name: String) throws -> Date? {
-        guard let raw = optionalString(name) else { return nil }
+    public func optionalDate(_ name: String) throws -> ParsedDate? {
+        guard let raw = try optionalString(name) else { return nil }
         return try DateParsing.parse(raw, argument: name, calendar: calendar)
     }
 
-    // MARK: Enumerations
+    /// `from_date` and `to_date`, both inclusive: the range starts where `from_date` starts
+    /// and ends where the precision `to_date` was written in ends, so "to 2026-08-12"
+    /// includes all of that day. `before` is that end, the first instant left out.
+    public func dateRange() throws -> (from: Date?, before: Date?) {
+        let from = try optionalDate("from_date")
+        let to = try optionalDate("to_date")
+        if let from, let to, to.end <= from.date { throw ToolError.rangeInverted }
+        return (from?.date, to?.end)
+    }
+
+    // MARK: Choices
 
     /// Media kinds by name. Unknown names are refused rather than ignored: a filter that
     /// silently drops the one term the caller cared about returns a confident wrong answer.
@@ -128,7 +176,7 @@ public struct Arguments {
                 throw ToolError.badArgument(
                     name: name,
                     reason:
-                        "\"\(raw)\" is not a media kind; expected one of "
+                        "\"\(ToolStandard.echo(raw))\" is not a media kind; expected one of "
                         + MediaKind.allCases.map(\.rawValue).joined(separator: ", "))
             }
             return kind
@@ -141,7 +189,7 @@ public struct Arguments {
                 throw ToolError.badArgument(
                     name: name,
                     reason:
-                        "\"\(raw)\" is not a chat kind; expected one of "
+                        "\"\(ToolStandard.echo(raw))\" is not a chat kind; expected one of "
                         + ChatKind.allCases.filter { $0 != .unknown }.map(\.rawValue)
                         .joined(separator: ", "))
             }
@@ -149,18 +197,17 @@ public struct Arguments {
         }
     }
 
-    // MARK: Ordering
-
     /// `order` is `newest` or `oldest`. Newest first by default, because a conversation
     /// is read from its end.
     public func newestFirst() throws -> Bool {
-        guard let raw = optionalString("order") else { return true }
+        guard let raw = try optionalString("order") else { return true }
         switch raw.lowercased() {
         case "newest": return true
         case "oldest": return false
         default:
             throw ToolError.badArgument(
-                name: "order", reason: "expected \"newest\" or \"oldest\", got \"\(raw)\"")
+                name: "order",
+                reason: "expected \"newest\" or \"oldest\", got \"\(ToolStandard.echo(raw))\"")
         }
     }
 }

@@ -40,14 +40,14 @@ struct DomainReaderTests {
         #expect(text.contains("group 120363000000000001@g.us"))
     }
 
-    @Test("calls_list honours the date range and its exclusive upper bound")
+    @Test("calls_list honours from_date and to_date, both inclusive")
     func callsRespectRange() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
         try callHistory(fake)
         let (text, _) = await call(
             fake.tools(), ToolCatalog.callsName,
-            ["after": .string("2026-08-01"), "before": .string("2026-08-31")])
+            ["from_date": .string("2026-08-01"), "to_date": .string("2026-08-31")])
         #expect(text.contains("1 call"))
         #expect(!text.contains("missed"))
     }
@@ -253,17 +253,17 @@ struct DomainReaderTests {
         try callHistory(fake)
         let (cut, cutError) = await call(fake.tools(), ToolCatalog.callsName, ["limit": .int(1)])
         #expect(!cutError, Comment(rawValue: cut))
-        #expect(cut.contains("Stopped at the limit of 1; there may be more: pass offset=1"))
+        #expect(cut.hasPrefix("Showing 1–1 of 2 calls. Pass offset=1 for the next page."), Comment(rawValue: cut))
 
         let (next, _) = await call(
             fake.tools(), ToolCatalog.callsName, ["limit": .int(1), "offset": .int(1)])
-        #expect(next.contains("pass offset=2"))
+        #expect(next.hasPrefix("Showing 2–2 of 2 calls. That is all."), Comment(rawValue: next))
 
         let (whole, _) = await call(fake.tools(), ToolCatalog.callsName, ["limit": .int(50)])
-        #expect(!whole.contains("Stopped at the limit"))
+        #expect(!whole.contains("Showing"))
     }
 
-    @Test("A cut list without offset paging says to raise the limit")
+    @Test("A channel list pages with offset, like every other listing")
     func cutChannelListSaysSo() async throws {
         let fake = try FakeContainer()
         defer { fake.remove() }
@@ -274,8 +274,11 @@ struct DomainReaderTests {
                 "INSERT INTO channel_metadata VALUES (1, '1@newsletter', 'Invented A', NULL, NULL), (2, '2@newsletter', 'Invented B', NULL, NULL)",
             ])
         let (cut, _) = await call(fake.tools(), ToolCatalog.channelsName, ["limit": .int(1)])
-        #expect(cut.contains("Stopped at the limit of 1; there may be more: raise limit"))
-        #expect(!cut.contains("offset="))
+        #expect(cut.hasPrefix("Showing 1–1 of 2 channels. Pass offset=1 for the next page."), Comment(rawValue: cut))
+        #expect(cut.contains("Invented A") && !cut.contains("Invented B"))
+        let (next, _) = await call(
+            fake.tools(), ToolCatalog.channelsName, ["limit": .int(1), "offset": .int(1)])
+        #expect(next.contains("Invented B") && !next.contains("Invented A"))
     }
 
     @Test("Without a reader the domain tools say so instead of crashing")

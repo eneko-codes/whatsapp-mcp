@@ -4,7 +4,13 @@ import Foundation
 public struct QueryResult: Sendable, Equatable {
     public var columns: [String]
     public var rows: [[String]]
-    public var truncated: Bool
+    /// The page ended before the statement's rows did.
+    public var moreRowsExist: Bool
+    /// At least one value on the page was shortened to `cellWidth`.
+    public var clippedCells: Bool
+    public var cellWidth: Int
+    /// Rows stepped over for the offset; when no row is on the page, how many there were.
+    public var rowsSkipped: Int
     public var source: SourceInfo
 }
 
@@ -20,7 +26,9 @@ public protocol DatabaseExplorer: Sendable {
     func tables(in database: AllowedDatabase) throws -> (entries: [TableEntry], source: SourceInfo)
     func schema(of database: AllowedDatabase, table: String?) throws
         -> (statements: [String], source: SourceInfo)
-    func select(_ sql: String, in database: AllowedDatabase, limit: Int) throws -> QueryResult
+    func select(
+        _ sql: String, in database: AllowedDatabase, limit: Int, offset: Int, maxCharacters: Int
+    ) throws -> QueryResult
 }
 
 /// Reads the allow-listed databases live, through `ContainerDatabases`. `db_query` is the
@@ -32,9 +40,6 @@ public struct LiveDatabaseExplorer: DatabaseExplorer {
     public init(databases: ContainerDatabases) {
         self.databases = databases
     }
-
-    public static let rowLimitRange = 1...500
-    public static let defaultRowLimit = 100
 
     public func tables(in database: AllowedDatabase) throws -> (
         entries: [TableEntry], source: SourceInfo
@@ -68,14 +73,16 @@ public struct LiveDatabaseExplorer: DatabaseExplorer {
         return (statements, info)
     }
 
-    public func select(_ sql: String, in database: AllowedDatabase, limit: Int) throws
-        -> QueryResult
-    {
+    public func select(
+        _ sql: String, in database: AllowedDatabase, limit: Int, offset: Int, maxCharacters: Int
+    ) throws -> QueryResult {
         let (connection, info) = try databases.open(database)
-        let selected = try connection.selectRows(sql, maxRows: limit)
+        let selected = try connection.selectRows(
+            sql, offset: offset, maxRows: limit, maxTotalCharacters: maxCharacters)
         return QueryResult(
-            columns: selected.columns, rows: selected.rows, truncated: selected.truncated,
-            source: info)
+            columns: selected.columns, rows: selected.rows, moreRowsExist: selected.moreRowsExist,
+            clippedCells: selected.clippedCells, cellWidth: selected.cellWidth,
+            rowsSkipped: selected.rowsSkipped, source: info)
     }
 
 }
